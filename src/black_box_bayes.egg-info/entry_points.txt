@@ -1,0 +1,2 @@
+[console_scripts]
+black-box-bayes = black_box_bayes.cli:main

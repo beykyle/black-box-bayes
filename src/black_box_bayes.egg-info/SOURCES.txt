@@ -1,0 +1,15 @@
+LICENSE
+README.md
+pyproject.toml
+src/black_box_bayes/__init__.py
+src/black_box_bayes/__main__.py
+src/black_box_bayes/cli.py
+src/black_box_bayes/posterior_interface.py
+src/black_box_bayes.egg-info/PKG-INFO
+src/black_box_bayes.egg-info/SOURCES.txt
+src/black_box_bayes.egg-info/dependency_links.txt
+src/black_box_bayes.egg-info/entry_points.txt
+src/black_box_bayes.egg-info/requires.txt
+src/black_box_bayes.egg-info/top_level.txt
+tests/test_idata_conversion.py
+tests/test_toy_cli.py

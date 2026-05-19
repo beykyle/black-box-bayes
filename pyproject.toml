@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "black_box_bayes"
+version = "0.1.1"
+description = "Small CLI for black-box Bayesian inference with emcee, dynesty, or PyMC and ArviZ NetCDF output."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Kyle Beyer"}]
+dependencies = [
+  "arviz>=0.16",
+  "dill>=0.3",
+  "numpy>=1.23",
+  "xarray>=2023.1",
+  "h5netcdf>=1",
+]
+
+[project.optional-dependencies]
+emcee = ["emcee>=3", "h5py>=3"]
+dynesty = ["dynesty>=2"]
+pymc = ["pymc>=5", "cloudpickle>=2", "pytensor>=2"]
+mpi = ["mpi4py>=3", "schwimmbad>=0.3"]
+test = ["pytest>=7", "emcee>=3", "h5py>=3", "h5netcdf>=1"]
+all = [
+  "emcee>=3", "h5py>=3",
+  "dynesty>=2",
+  "pymc>=5", "cloudpickle>=2", "pytensor>=2",
+  "mpi4py>=3", "schwimmbad>=0.3",
+]
+
+[project.scripts]
+black-box-bayes = "black_box_bayes.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
