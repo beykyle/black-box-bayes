@@ -1,0 +1,24 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Test caches
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.DS_Store
+
+# black-box-bayes generated outputs
+chains.h5
+*_idata.nc
+dynesty_results.npz
+output/
+
+# Toy example generated files
+examples/toy/toy_config.pkl

@@ -209,3 +209,11 @@ The `.npz` archive stores array-like fields such as `samples`, `logl`, `logwt`, 
 pip install -e .[test]
 pytest
 ```
+
+To run the optional MPI integration coverage as well, install the MPI extras and
+use an environment that provides `mpiexec`:
+
+```bash
+pip install -e .[test,mpi]
+pytest tests/test_toy_cli.py -k mpi
+```

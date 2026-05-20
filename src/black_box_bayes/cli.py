@@ -74,6 +74,23 @@ def _import_optional(name: str, install_hint: str):
         raise ImportError(f"{name} is required here. Install with `{install_hint}`.") from exc
 
 
+def _import_posterior_module(name: str):
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        if exc.name != name:
+            raise
+        cwd = Path.cwd()
+        module_file = cwd / f"{name}.py"
+        package_init = cwd / name / "__init__.py"
+        if not module_file.exists() and not package_init.exists():
+            raise
+        cwd_str = str(cwd)
+        if cwd_str not in sys.path:
+            sys.path.insert(0, cwd_str)
+        return importlib.import_module(name)
+
+
 def _emcee_imports():
     global emcee
     emcee = _import_optional("emcee", "pip install emcee")
@@ -1102,7 +1119,7 @@ def _mpi_timing(args, pool, size):
 def main(argv=None):
     global posterior
     args = parse_args(argv)
-    posterior = importlib.import_module(args.posterior_module)
+    posterior = _import_posterior_module(args.posterior_module)
     posterior.init_posterior(args.input)
     warm_point = _warmup_and_validate(args)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +56,20 @@ def test_idata_results_path_uses_deprecated_aliases(tmp_path):
 
     args = cli.parse_args(["--input", "cfg.pkl", "--pymc-results", str(tmp_path / "pymc_alias.nc")])
     assert cli._idata_results_path(args, "pymc") == tmp_path / "pymc_alias.nc"
+
+
+def test_import_posterior_module_loads_from_current_directory(monkeypatch, tmp_path):
+    module_name = "posterior"
+    module_path = tmp_path / f"{module_name}.py"
+    module_path.write_text("VALUE = 7\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if Path(p or ".").resolve() != tmp_path.resolve()])
+    sys.modules.pop(module_name, None)
+
+    module = cli._import_posterior_module(module_name)
+
+    assert module.VALUE == 7
+    assert Path(module.__file__).resolve() == module_path.resolve()
 
 
 def test_warmup_validate_rejects_invalid_ndim():
