@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=1
 
 # load modules, e.g.:
-# module load python/3.8
+# module load python/3.10
 # module load mpi 
 
 python -c 'import black_box_bayes; print("black-box-bayes is available")'
