@@ -1,20 +1,21 @@
 # 🅱️lack 🅱️ox 🅱️ayes
 
-Do you want to do Bayesian inference with an expensive computer model? If your output space is small enough, you can probably emulate, so go check out [`surmise`](github.com/bandframework/surmise). Oh, you have a big output space? Well, if you model is differentiable, you probably want to use a fancy sampler that can take advantage of gradients, like [`PyMC`'s NUTS](https://www.pymc.io/projects/docs/en/v5.9.0/api/generated/pymc.NUTS.html).
+Do you want to do Bayesian inference with an expensive computer model? You can probably emulate it, so go check out [`surmise`](https://github.com/bandframework/surmise/)!
 
-Ahh, you have a big output space and your model is not differentiable? Welcome to Black Box Bayes! This package provides a simple CLI for running production-scale Bayesian inference on black-box models with `emcee`, `dynesty`, or `PyMC`. All you have to do is provide some minimal information (`log_posterior`, `log_prior`, etc.), and `black-box-bayes` (or 🅱️🅱️🅱️) can run production inference for your model using either
+Oh, you have too big of an output space for emulation? Well, if you model is differentiable, you probably want to use a fancy sampler that can take advantage of gradients, like [`PyMC`'s NUTS](https://www.pymc.io/projects/docs/en/v5.9.0/api/generated/pymc.NUTS.html).
+
+Ahh, you have a big output space and your model is not differentiable? That sucks, welcome to Black Box Bayes! This package provides a simple CLI for running production-scale Bayesian inference on black-box models with `emcee`, `dynesty`, or `PyMC`'s none gradient-requiring samplers. All you have to do is provide some minimal information (`log_posterior`, `log_prior`, etc.), and `black-box-bayes` (or 🅱️🅱️🅱️) can run production inference for your model using either
 
 - [`emcee`](https://emcee.readthedocs.io/en/stable/) for affine-invariant ensemble sampling
 - [`dynesty`](https://dynesty.readthedocs.io/en/latest/) for nested sampling and evidence estimation
 - [`PyMC`](https://www.pymc.io/) for adaptive Metropolis-Hastings sampling
 
-In all cases, the output is an ArviZ `InferenceData` NetCDF file, so post processing workflows are the same regardless of sampler choice. In all cases, massive parallelism is available via MPI (requiring `schwimmbad`), so high performance computing environments and many chains are no problem.
+In all cases, the output is an ArviZ `InferenceData` NetCDF file, so post processing workflows are the same regardless of sampler choice. In all cases, massive parallelism is available via MPI (requiring `schwimmbad`), so high performance computing environments, many chains, and long calibrations are no problem.
 
 ## What is 🅱️🅱️🅱️?
 
 A small installable package that exposes a single CLI, `black-box-bayes`, for
-black-box Bayesian inference with `emcee`, `dynesty`, or `PyMC`. Every sampler
-writes an ArviZ `InferenceData` NetCDF file.
+black-box Bayesian inference with `emcee`, `dynesty`, or `PyMC`.
 
 The driver expects `--input` to point at a pickled config-like object exposing:
 
