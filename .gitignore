@@ -1,3 +1,6 @@
+# egg info
+*.egg-info/
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
@@ -15,9 +18,9 @@ env/
 .DS_Store
 
 # black-box-bayes generated outputs
-chains.h5
-*_idata.nc
-dynesty_results.npz
+*.h5
+*.nc
+*.npz
 output/
 
 # Toy example generated files

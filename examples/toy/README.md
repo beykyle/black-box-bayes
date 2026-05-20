@@ -4,7 +4,7 @@ From this directory after installing the package:
 
 ```bash
 python make_config.py
-black-box-bayes --input toy_config.pkl --posterior-module posterior \
+black-box-bayes --input toy_config.pkl \
   --sampler emcee --chains 16 --steps 1000 --burnin 200 \
   --no-mpi --idata-results toy_emcee_idata.nc
 ```

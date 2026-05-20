@@ -31,7 +31,7 @@ def subprocess_env():
 
 
 def copy_toy(tmp_path: Path):
-    for name in ["toy_model.py", "posterior.py", "make_config.py"]:
+    for name in ["toy_model.py", "make_config.py"]:
         shutil.copy(TOY / name, tmp_path / name)
 
 
@@ -46,8 +46,6 @@ def test_toy_serial_timing_cli(tmp_path):
             "black_box_bayes",
             "--input",
             "toy_config.pkl",
-            "--posterior-module",
-            "posterior",
             "--sampler",
             "emcee",
             "--chains",
@@ -79,8 +77,6 @@ def test_toy_emcee_cli_writes_idata(tmp_path):
             "black_box_bayes",
             "--input",
             "toy_config.pkl",
-            "--posterior-module",
-            "posterior",
             "--sampler",
             "emcee",
             "--chains",
@@ -118,8 +114,6 @@ def test_toy_mpi_timing_cli_distributes_work(tmp_path):
             "black_box_bayes",
             "--input",
             "toy_config.pkl",
-            "--posterior-module",
-            "posterior",
             "--sampler",
             "emcee",
             "--chains",

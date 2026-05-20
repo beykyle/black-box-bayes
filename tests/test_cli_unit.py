@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import pickle
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -58,18 +60,72 @@ def test_idata_results_path_uses_deprecated_aliases(tmp_path):
     assert cli._idata_results_path(args, "pymc") == tmp_path / "pymc_alias.nc"
 
 
-def test_import_posterior_module_loads_from_current_directory(monkeypatch, tmp_path):
-    module_name = "posterior"
+def test_load_input_object_loads_local_module_from_input_directory(monkeypatch, tmp_path):
+    module_name = "local_model"
     module_path = tmp_path / f"{module_name}.py"
-    module_path.write_text("VALUE = 7\n", encoding="utf-8")
+    module_path.write_text(
+        "class LocalConfig:\n"
+        "    ndim = 2\n"
+        "    parameter_names = ['x', 'y']\n"
+        "    def starting_location(self, nwalkers):\n"
+        "        return [[0.0, 0.0] for _ in range(nwalkers)]\n"
+        "    def log_posterior(self, theta):\n"
+        "        return 0.0\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    cfg_path = tmp_path / "cfg.pkl"
+    with cfg_path.open("wb") as f:
+        pickle.dump(module.LocalConfig(), f)
+
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "path", [p for p in sys.path if Path(p or ".").resolve() != tmp_path.resolve()])
     sys.modules.pop(module_name, None)
 
-    module = cli._import_posterior_module(module_name)
+    loaded = cli._load_input_object(cfg_path)
 
-    assert module.VALUE == 7
-    assert Path(module.__file__).resolve() == module_path.resolve()
+    assert loaded.__class__.__module__ == module_name
+    assert loaded.parameter_names == ["x", "y"]
+
+
+def test_posterior_from_config_normalizes_object_interface(monkeypatch, tmp_path):
+    module_name = "local_model"
+    module_path = tmp_path / f"{module_name}.py"
+    module_path.write_text(
+        "import numpy as np\n"
+        "class LocalConfig:\n"
+        "    ndim = 2\n"
+        "    parameter_names = ['x', 'y']\n"
+        "    def starting_location(self, nwalkers):\n"
+        "        return np.zeros((nwalkers, 2), dtype=float)\n"
+        "    def log_posterior(self, theta):\n"
+        "        return float(-0.5 * np.sum(np.asarray(theta, dtype=float) ** 2))\n"
+        "    def log_likelihood(self, theta):\n"
+        "        return self.log_posterior(theta)\n"
+        "    def prior_transform(self, u):\n"
+        "        return np.asarray(u, dtype=float)\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    cfg_path = tmp_path / "cfg.pkl"
+    with cfg_path.open("wb") as f:
+        pickle.dump(module.LocalConfig(), f)
+
+    monkeypatch.chdir(tmp_path)
+    posterior = cli._posterior_from_config(cfg_path)
+
+    assert posterior.NDIM == 2
+    assert posterior.PARAMETER_NAMES == ["x", "y"]
+    np.testing.assert_allclose(posterior.starting_location(3), np.zeros((3, 2)))
+    assert posterior.log_posterior(np.array([1.0, 2.0])) == pytest.approx(-2.5)
 
 
 def test_warmup_validate_rejects_invalid_ndim():

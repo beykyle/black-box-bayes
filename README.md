@@ -14,22 +14,23 @@ In all cases, the output is an ArviZ `InferenceData` NetCDF file, so post proces
 
 A small installable package that exposes a single CLI, `black-box-bayes`, for
 black-box Bayesian inference with `emcee`, `dynesty`, or `PyMC`. Every sampler
-writes an ArviZ `InferenceData` NetCDF file. 
+writes an ArviZ `InferenceData` NetCDF file.
 
-The driver expects a lightweight posterior module, defaulting to a top-level
-`posterior.py` in the working directory. That module should expose:
+The driver expects `--input` to point at a pickled config-like object exposing:
 
 ```python
-init_posterior(config_path)
+ndim
 starting_location(nwalkers)
 log_posterior(theta)
 log_likelihood(theta)      # required for dynesty
 prior_transform(u)         # required for dynesty
 log_posterior_batch(thetas)  # optional
-NDIM
+parameter_names           # optional
 ```
 
-See `src/black_box_bayes/posterior_interface.py` for a reference implementation.
+The object's defining module still needs to be importable when the pickle is
+loaded (for example, by running from the model directory or putting that code on
+`PYTHONPATH`).
 
 ## Local install
 
@@ -54,7 +55,7 @@ black-box-bayes --help
 prints:
 
 ```
-usage: black-box-bayes [-h] --input INPUT [--posterior-module POSTERIOR_MODULE] [--output OUTPUT]
+usage: black-box-bayes [-h] --input INPUT [--output OUTPUT]
                        [--idata-results IDATA_RESULTS] [--sampler {emcee,dynesty,pymc}] [--no-mpi] [--require-mpi]
                        [--chains CHAINS] [--pymc-chains PYMC_CHAINS] [--steps STEPS] [--idata-discard IDATA_DISCARD]
                        [--idata-thin IDATA_THIN] [--emcee-backend EMCEE_BACKEND] [--burnin BURNIN]
@@ -79,17 +80,15 @@ usage: black-box-bayes [-h] --input INPUT [--posterior-module POSTERIOR_MODULE] 
                        [--pymc-progress | --no-pymc-progress] [--pymc-target-accept PYMC_TARGET_ACCEPT]
                        [--pymc-results PYMC_RESULTS] [--pymc-random-seed PYMC_RANDOM_SEED]
 
-Unified black-box Bayesian inference driver. This driver expects a lightweight ``posterior`` module exposing:
-init_posterior(config_path) starting_location(nwalkers) log_posterior(theta) log_likelihood(theta)
-prior_transform(u) # required for dynesty log_posterior_batch(thetas) # optional; used for timing only NDIM All
-samplers write an ArviZ InferenceData NetCDF file.
+Unified black-box Bayesian inference driver. This driver expects --input to point at a pickled
+config-like object exposing: ndim starting_location(nwalkers) log_posterior(theta)
+log_likelihood(theta) # required for dynesty prior_transform(u) # required for dynesty
+log_posterior_batch(thetas) # optional; used for timing only parameter_names # optional
+All samplers write an ArviZ InferenceData NetCDF file.
 
 options:
   -h, --help            show this help message and exit
   --input INPUT         Path to pickled CalibrationConfig-like object.
-  --posterior-module POSTERIOR_MODULE
-                        Import path for the lightweight posterior interface module. Defaults to a top-level module
-                        named 'posterior' in the current project.
   --output OUTPUT       Output directory.
   --idata-results IDATA_RESULTS
                         ArviZ InferenceData NetCDF output path.
@@ -166,7 +165,7 @@ options:
 ```bash
 cd examples/toy
 python make_config.py
-black-box-bayes --input toy_config.pkl --posterior-module posterior \
+black-box-bayes --input toy_config.pkl \
   --sampler emcee --chains 16 --steps 1000 --burnin 200 \
   --no-mpi --idata-results toy_emcee_idata.nc
 ```

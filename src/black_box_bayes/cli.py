@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Unified black-box Bayesian inference driver.
 
-This driver expects a lightweight ``posterior`` module exposing:
+This driver expects ``--input`` to point at a pickled config-like object exposing:
 
-    init_posterior(config_path)
+    ndim
     starting_location(nwalkers)
     log_posterior(theta)
-    log_likelihood(theta)
-    prior_transform(u)       # required for dynesty
-    log_posterior_batch(thetas)  # optional; used for timing only
-    NDIM
+    log_likelihood(theta)       # required for dynesty
+    prior_transform(u)          # required for dynesty
+    log_posterior_batch(thetas) # optional; used for timing only
+    parameter_names             # optional
 
 All samplers write an ArviZ InferenceData NetCDF file.
 """
@@ -24,14 +24,21 @@ import os
 import sys
 from pathlib import Path
 from time import time
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 import arviz as az
 import numpy as np
+
+try:
+    import dill as pickle
+except ImportError:  # pragma: no cover - dill is a declared dependency, fallback helps examples.
+    import pickle
 import xarray as xr
 
-# Posterior module is loaded at runtime from --posterior-module.
+# Runtime posterior adapter built from --input.
 posterior = None
+_CONFIG = None
 
 # Optional dependencies, imported only when needed.
 emcee = None
@@ -74,21 +81,72 @@ def _import_optional(name: str, install_hint: str):
         raise ImportError(f"{name} is required here. Install with `{install_hint}`.") from exc
 
 
-def _import_posterior_module(name: str):
-    try:
-        return importlib.import_module(name)
-    except ModuleNotFoundError as exc:
-        if exc.name != name:
-            raise
-        cwd = Path.cwd()
-        module_file = cwd / f"{name}.py"
-        package_init = cwd / name / "__init__.py"
-        if not module_file.exists() and not package_init.exists():
-            raise
-        cwd_str = str(cwd)
-        if cwd_str not in sys.path:
-            sys.path.insert(0, cwd_str)
-        return importlib.import_module(name)
+def _prepend_sys_path(path: Path):
+    path_str = str(path.resolve())
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+
+def _load_input_object(config_path: str | os.PathLike[str]):
+    path = Path(config_path)
+    resolved = path.resolve()
+    _prepend_sys_path(Path.cwd())
+    _prepend_sys_path(resolved.parent)
+    with resolved.open("rb") as f:
+        return pickle.load(f)
+
+
+def _config_starting_location(nwalkers):
+    return _CONFIG.starting_location(nwalkers)
+
+
+def _config_log_posterior(theta):
+    return _CONFIG.log_posterior(theta)
+
+
+def _config_log_likelihood(theta):
+    return _CONFIG.log_likelihood(theta)
+
+
+def _config_prior_transform(u):
+    return _CONFIG.prior_transform(u)
+
+
+def _config_log_posterior_batch(thetas):
+    if hasattr(_CONFIG, "log_posterior_batch"):
+        return _CONFIG.log_posterior_batch(thetas)
+    return np.array([_CONFIG.log_posterior(theta) for theta in thetas])
+
+
+def _posterior_from_config(config_path: str | os.PathLike[str]):
+    global _CONFIG
+    _CONFIG = _load_input_object(config_path)
+    ndim = getattr(_CONFIG, "NDIM", getattr(_CONFIG, "ndim", None))
+    parameter_names = None
+    for name in ("PARAMETER_NAMES", "parameter_names", "param_names"):
+        if hasattr(_CONFIG, name):
+            parameter_names = getattr(_CONFIG, name)
+            break
+
+    attrs: dict[str, Any] = {
+        "NDIM": ndim,
+        "starting_location": _config_starting_location,
+        "log_posterior": _config_log_posterior,
+        "log_posterior_batch": _config_log_posterior_batch,
+    }
+    if parameter_names is not None:
+        attrs["PARAMETER_NAMES"] = parameter_names
+
+    if hasattr(_CONFIG, "log_likelihood"):
+        attrs["log_likelihood"] = _config_log_likelihood
+    if hasattr(_CONFIG, "prior_transform"):
+        attrs["prior_transform"] = _config_prior_transform
+
+    for name in ("parameter_names", "param_names", "prior_mean", "PRIOR_MEAN"):
+        if hasattr(_CONFIG, name):
+            attrs[name] = getattr(_CONFIG, name)
+
+    return SimpleNamespace(**attrs)
 
 
 def _emcee_imports():
@@ -205,12 +263,12 @@ def _check_logp(theta: np.ndarray):
 
 def _check_for_log_likelihood():
     if not hasattr(posterior, "log_likelihood"):
-        raise AttributeError("posterior.py must expose log_likelihood(theta).")
+        raise AttributeError("The input object must expose log_likelihood(theta).")
 
 
 def _check_for_prior_transform():
     if not hasattr(posterior, "prior_transform"):
-        raise AttributeError("posterior.py must expose prior_transform(u) for dynesty.")
+        raise AttributeError("The input object must expose prior_transform(u) for dynesty.")
 
 
 def _prior_mean_or_representative() -> np.ndarray:
@@ -679,14 +737,6 @@ def _run_pymc_chain(payload):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="Path to pickled CalibrationConfig-like object.")
-    parser.add_argument(
-        "--posterior-module",
-        default="posterior",
-        help=(
-            "Import path for the lightweight posterior interface module. "
-            "Defaults to a top-level module named 'posterior' in the current project."
-        ),
-    )
     parser.add_argument("--output", default="./", help="Output directory.")
     parser.add_argument("--idata-results", default=None, help="ArviZ InferenceData NetCDF output path.")
     parser.add_argument("--sampler", choices=["emcee", "dynesty", "pymc"], default="emcee")
@@ -1119,8 +1169,7 @@ def _mpi_timing(args, pool, size):
 def main(argv=None):
     global posterior
     args = parse_args(argv)
-    posterior = _import_posterior_module(args.posterior_module)
-    posterior.init_posterior(args.input)
+    posterior = _posterior_from_config(args.input)
     warm_point = _warmup_and_validate(args)
 
     if args.serial_timing_test:
