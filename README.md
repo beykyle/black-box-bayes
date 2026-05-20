@@ -4,7 +4,7 @@ Do you want to do Bayesian inference with an expensive computer model? You can p
 
 Oh, you have too big of an output space for easy emulation? Well, if your model is differentiable, you probably want to use a fancy sampler that can take advantage of gradients, like [`PyMC`'s NUTS](https://www.pymc.io/projects/docs/en/v5.9.0/api/generated/pymc.NUTS.html).
 
-Ahh, you have a big output space and your model is not differentiable? That sucks, welcome to Black Box Bayes! This package provides a simple CLI for running production-scale Bayesian inference on black-box models with `emcee`, `dynesty`, or `PyMC`'s none gradient-requiring samplers. All you have to do is provide some minimal information (`log_posterior`, `log_prior`, etc.), and `black-box-bayes` (or 🅱️🅱️🅱️) can run production inference for your model using either
+Ahh, you have a big output space and your model is not differentiable? That sucks, welcome to Black Box Bayes! This package provides a simple CLI for running production-scale Bayesian inference on black-box models with `emcee`, `dynesty`, or `PyMC`('s non-gradient-requiring) samplers. All you have to do is provide some minimal information (`log_posterior`, `log_prior`, etc.), and `black-box-bayes` (or 🅱️🅱️🅱️) can run production inference for your model using either
 
 - [`emcee`](https://emcee.readthedocs.io/en/stable/) for affine-invariant ensemble sampling
 - [`dynesty`](https://dynesty.readthedocs.io/en/latest/) for nested sampling and evidence estimation
