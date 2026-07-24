@@ -30,6 +30,10 @@ class DummyPosterior:
         return float(-0.5 * np.sum(np.asarray(theta, dtype=float) ** 2))
 
     @staticmethod
+    def log_prior(theta):
+        return float(-0.5 * np.sum(np.asarray(theta, dtype=float) ** 2))
+
+    @staticmethod
     def prior_transform(u):
         return np.asarray(u, dtype=float)
 
@@ -43,6 +47,8 @@ class DummyPosterior:
         (["--input", "cfg.pkl", "--idata-thin", "0"], "--idata-thin must be positive"),
         (["--input", "cfg.pkl", "--queue-size", "0"], "--queue-size must be positive"),
         (["--input", "cfg.pkl", "--dynesty-pfrac", "1.5"], "--dynesty-pfrac must be between 0 and 1"),
+        (["--input", "cfg.pkl", "--ptemcee-ntemps", "0"], "--ptemcee-ntemps must be positive"),
+        (["--input", "cfg.pkl", "--ptemcee-tmax", "1"], "--ptemcee-tmax must be greater than 1"),
     ],
 )
 def test_parse_args_rejects_invalid_inputs(argv, message, capsys):
@@ -165,6 +171,99 @@ def test_warmup_validate_rejects_nan_log_posterior(monkeypatch):
     )
     with pytest.raises(ValueError, match="returned NaN"):
         cli._warmup_and_validate(Namespace(sampler="emcee", chains=4, steps=5))
+
+
+def test_warmup_validate_ptemcee_requires_log_prior(monkeypatch):
+    monkeypatch.setattr(cli, "_ptemcee_imports", lambda: None)
+    cli.posterior = SimpleNamespace(
+        NDIM=2,
+        starting_location=lambda n: np.zeros((n, 2), dtype=float),
+        log_likelihood=lambda theta: 0.0,
+    )
+    with pytest.raises(AttributeError, match="log_prior"):
+        cli._warmup_and_validate(Namespace(sampler="ptemcee", chains=4, steps=5))
+
+
+def test_warmup_validate_ptemcee_rejects_nan_log_prior(monkeypatch):
+    monkeypatch.setattr(cli, "_ptemcee_imports", lambda: None)
+    cli.posterior = SimpleNamespace(
+        NDIM=2,
+        starting_location=lambda n: np.zeros((n, 2), dtype=float),
+        log_likelihood=lambda theta: 0.0,
+        log_prior=lambda theta: np.nan,
+    )
+    with pytest.raises(ValueError, match="log_prior returned NaN"):
+        cli._warmup_and_validate(Namespace(sampler="ptemcee", chains=4, steps=5))
+
+
+def test_run_ptemcee_builds_ladder_and_writes_outputs(monkeypatch, tmp_path):
+    cli.posterior = DummyPosterior
+    records: dict[str, object] = {}
+
+    class FakeChain:
+        def __init__(self, p0):
+            self.x = np.zeros((0, 3, 4, 2), dtype=float)
+            self.logP = np.zeros((0, 3, 4), dtype=float)
+            self.ensemble = SimpleNamespace(x=np.asarray(p0))
+
+        def run(self, count):
+            new = np.zeros((count, 3, 4, 2), dtype=float)
+            self.x = np.concatenate([self.x, new], axis=0)
+            self.logP = np.concatenate([self.logP, np.zeros((count, 3, 4))], axis=0)
+
+        def get_acts(self):
+            return np.ones((3, 2), dtype=float)
+
+        def log_evidence_estimate(self):
+            return -1.0, 0.1
+
+    class FakeSampler:
+        def __init__(self, nwalkers, ndim, logl, logp, betas=None, adaptive=False, scale_factor=2.0, mapper=map):
+            records["nwalkers"] = nwalkers
+            records["ndim"] = ndim
+            records["betas"] = np.asarray(betas)
+            records["adaptive"] = adaptive
+            records["mapper"] = mapper
+
+        def chain(self, p0):
+            records["p0_shape"] = np.asarray(p0).shape
+            return FakeChain(p0)
+
+    def fake_make_ladder(ndim, ntemps=None, Tmax=None):
+        records["ladder_ntemps"] = ntemps
+        return np.array([1.0, 0.5, 0.1])
+
+    monkeypatch.setattr(cli, "_ptemcee_imports", lambda: None)
+    monkeypatch.setattr(cli, "ptemcee", SimpleNamespace(Sampler=FakeSampler, make_ladder=fake_make_ladder))
+    monkeypatch.setattr(cli, "_ptemcee_to_inferencedata", lambda chain, args, runtime_seconds=None: "idata")
+    monkeypatch.setattr(cli, "_write_idata", lambda idata, path: path)
+    monkeypatch.setattr(cli, "_write_ptemcee_native_results", lambda chain, path: path)
+
+    args = Namespace(
+        input="fake.pkl",
+        output=str(tmp_path),
+        idata_results=None,
+        chains=4,
+        steps=10,
+        burnin=0,
+        batch_size=None,
+        step_size=2.0,
+        rtol=0.01,
+        ptemcee_ntemps=3,
+        ptemcee_tmax=None,
+        ptemcee_adaptive=True,
+        ptemcee_progress=False,
+        ptemcee_native_results=None,
+        no_ptemcee_native_results=False,
+    )
+
+    cli.run_ptemcee(args, cli.SerialPool(), size=1)
+
+    assert records["nwalkers"] == 4
+    assert records["ndim"] == 2
+    assert records["ladder_ntemps"] == 3
+    assert records["p0_shape"] == (3, 4, 2)  # (ntemps, nwalkers, ndim)
+    assert records["adaptive"] is True
 
 
 def test_warmup_validate_dynesty_requires_hooks(monkeypatch):

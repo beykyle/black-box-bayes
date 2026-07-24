@@ -100,6 +100,49 @@ def test_toy_emcee_cli_writes_idata(tmp_path):
     assert np.all(np.isfinite(mean))
 
 
+@pytest.mark.skipif(importlib.util.find_spec("ptemcee") is None, reason="ptemcee is not installed")
+def test_toy_ptemcee_cli_writes_idata_and_native_archive(tmp_path):
+    copy_toy(tmp_path)
+    subprocess.run([sys.executable, "make_config.py"], cwd=tmp_path, check=True)
+    out = tmp_path / "toy_ptemcee_idata.nc"
+    native = tmp_path / "toy_ptemcee_results.npz"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "black_box_bayes",
+            "--input",
+            "toy_config.pkl",
+            "--sampler",
+            "ptemcee",
+            "--chains",
+            "8",
+            "--steps",
+            "200",
+            "--ptemcee-ntemps",
+            "4",
+            "--no-mpi",
+            "--idata-results",
+            str(out),
+            "--ptemcee-native-results",
+            str(native),
+        ],
+        cwd=tmp_path,
+        env=subprocess_env(),
+        check=True,
+    )
+    idata = az.from_netcdf(out)
+    assert "theta" in idata.posterior
+    assert idata.posterior["theta"].shape[-1] == 2
+    mean = idata.posterior["theta"].mean(("chain", "draw")).values
+    assert np.all(np.isfinite(mean))
+
+    data = np.load(native)
+    assert data["x"].ndim == 4  # (draw, ntemps, walker, dim)
+    assert data["x"].shape[1] == 4  # ntemps
+    assert "log_evidence" in data.files
+
+
 @pytest.mark.skipif(not mpi_available(), reason="mpiexec, mpi4py, schwimmbad, and emcee are required")
 def test_toy_mpi_timing_cli_distributes_work(tmp_path):
     copy_toy(tmp_path)

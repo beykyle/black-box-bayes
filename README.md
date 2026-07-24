@@ -4,9 +4,10 @@ Do you want to do Bayesian inference with an expensive computer model? You can p
 
 Oh, you have too big of an output space for easy emulation? Well, if your model is differentiable, you probably want to use a fancy sampler that can take advantage of gradients, like [`PyMC`'s NUTS](https://www.pymc.io/projects/docs/en/v5.9.0/api/generated/pymc.NUTS.html).
 
-Ahh, you have a big output space and your model is not differentiable? That sucks, welcome to Black Box Bayes! This package provides a simple CLI for running production-scale Bayesian inference on black-box models with `emcee`, `dynesty`, or `PyMC`('s non-gradient-requiring) samplers. All you have to do is provide some minimal information (`log_posterior`, `log_prior`, etc.), and `black-box-bayes` (or 🅱️🅱️🅱️) can run production inference for your model using either
+Ahh, you have a big output space and your model is not differentiable? That sucks, welcome to Black Box Bayes! This package provides a simple CLI for running production-scale Bayesian inference on black-box models with `emcee`, `ptemcee`, `dynesty`, or `PyMC`('s non-gradient-requiring) samplers. All you have to do is provide some minimal information (`log_posterior`, `log_prior`, etc.), and `black-box-bayes` (or 🅱️🅱️🅱️) can run production inference for your model using either
 
 - [`emcee`](https://emcee.readthedocs.io/en/stable/) for affine-invariant ensemble sampling
+- [`ptemcee`](https://github.com/NuclearTalent/ptemcee_2025) for adaptive parallel-tempered ensemble sampling (multi-modal posteriors and evidence estimation)
 - [`dynesty`](https://dynesty.readthedocs.io/en/latest/) for nested sampling and evidence estimation
 - [`PyMC`](https://www.pymc.io/) for adaptive Metropolis-Hastings sampling
 
@@ -15,7 +16,7 @@ In all cases, the output is an ArviZ `InferenceData` NetCDF file, so post proces
 ## What is 🅱️🅱️🅱️?
 
 A small installable package that exposes a single CLI, `black-box-bayes`, for
-black-box Bayesian inference with `emcee`, `dynesty`, or `PyMC`.
+black-box Bayesian inference with `emcee`, `ptemcee`, `dynesty`, or `PyMC`.
 
 The driver expects `--input` to point at a pickled config-like object exposing:
 
@@ -23,11 +24,16 @@ The driver expects `--input` to point at a pickled config-like object exposing:
 ndim
 starting_location(nwalkers)
 log_posterior(theta)
-log_likelihood(theta)      # required for dynesty
+log_likelihood(theta)      # required for dynesty and ptemcee
+log_prior(theta)           # required for ptemcee
 prior_transform(u)         # required for dynesty
 log_posterior_batch(thetas)  # optional
 parameter_names           # optional
 ```
+
+`ptemcee` tempers the likelihood while holding the prior fixed, so it needs
+`log_likelihood` and `log_prior` as two separate callables (unlike `emcee`, which
+only needs the combined `log_posterior`).
 
 The object's defining module still needs to be importable when the pickle is
 loaded (for example, by running from the model directory or putting that code on
@@ -42,9 +48,17 @@ pip install -e .[emcee,test]
 Install extra backends as needed:
 
 ```bash
+pip install -e .[ptemcee]
 pip install -e .[dynesty]
 pip install -e .[pymc]
 pip install -e .[all]
+```
+
+The `ptemcee` extra installs the v2 (attrs-based) `ptemcee` API from PyPI. To use
+the NuclearTalent fork instead:
+
+```bash
+pip install "git+https://github.com/NuclearTalent/ptemcee_2025"
 ```
 
 ## Interface
@@ -57,11 +71,15 @@ prints:
 
 ```
 usage: black-box-bayes [-h] --input INPUT [--output OUTPUT]
-                       [--idata-results IDATA_RESULTS] [--sampler {emcee,dynesty,pymc}] [--no-mpi] [--require-mpi]
+                       [--idata-results IDATA_RESULTS] [--sampler {emcee,ptemcee,dynesty,pymc}] [--no-mpi] [--require-mpi]
                        [--chains CHAINS] [--pymc-chains PYMC_CHAINS] [--steps STEPS] [--idata-discard IDATA_DISCARD]
                        [--idata-thin IDATA_THIN] [--emcee-backend EMCEE_BACKEND] [--burnin BURNIN]
                        [--batch-size BATCH_SIZE] [--step-size STEP_SIZE] [--rtol RTOL]
-                       [--emcee-progress | --no-emcee-progress] [--serial-timing-test] [--MPI-timing-test]
+                       [--emcee-progress | --no-emcee-progress]
+                       [--ptemcee-ntemps PTEMCEE_NTEMPS] [--ptemcee-tmax PTEMCEE_TMAX]
+                       [--ptemcee-adaptive | --no-ptemcee-adaptive] [--ptemcee-progress | --no-ptemcee-progress]
+                       [--ptemcee-native-results PTEMCEE_NATIVE_RESULTS] [--no-ptemcee-native-results]
+                       [--serial-timing-test] [--MPI-timing-test]
                        [--dynesty-run {static,single,dynamic}] [--nlive NLIVE] [--nlive-batch NLIVE_BATCH]
                        [--dynesty-bound {none,single,multi,balls,cubes}]
                        [--dynesty-sample {auto,unif,rwalk,slice,rslice}] [--dynesty-walks DYNESTY_WALKS]
@@ -83,9 +101,9 @@ usage: black-box-bayes [-h] --input INPUT [--output OUTPUT]
 
 Unified black-box Bayesian inference driver. This driver expects --input to point at a pickled
 config-like object exposing: ndim starting_location(nwalkers) log_posterior(theta)
-log_likelihood(theta) # required for dynesty prior_transform(u) # required for dynesty
-log_posterior_batch(thetas) # optional; used for timing only parameter_names # optional
-All samplers write an ArviZ InferenceData NetCDF file.
+log_likelihood(theta) # required for dynesty and ptemcee log_prior(theta) # required for ptemcee
+prior_transform(u) # required for dynesty log_posterior_batch(thetas) # optional; used for timing only
+parameter_names # optional All samplers write an ArviZ InferenceData NetCDF file.
 
 options:
   -h, --help            show this help message and exit
@@ -93,7 +111,7 @@ options:
   --output OUTPUT       Output directory.
   --idata-results IDATA_RESULTS
                         ArviZ InferenceData NetCDF output path.
-  --sampler {emcee,dynesty,pymc}
+  --sampler {emcee,ptemcee,dynesty,pymc}
   --no-mpi              Force serial execution even if MPI is installed.
   --require-mpi         Fail unless running with mpi4py/schwimmbad and at least one worker rank.
   --chains CHAINS       emcee walkers or PyMC chains.
@@ -111,6 +129,20 @@ options:
   --step-size STEP_SIZE
   --rtol RTOL
   --emcee-progress, --no-emcee-progress
+  --ptemcee-ntemps PTEMCEE_NTEMPS
+                        Number of ptemcee temperatures in the ladder.
+  --ptemcee-tmax PTEMCEE_TMAX
+                        Maximum ptemcee ladder temperature (e.g. inf for adaptive PT); default derives Tmax
+                        from --ptemcee-ntemps.
+  --ptemcee-adaptive, --no-ptemcee-adaptive
+                        Enable adaptive parallel tempering.
+  --ptemcee-progress, --no-ptemcee-progress
+  --ptemcee-native-results PTEMCEE_NATIVE_RESULTS
+                        ptemcee-native all-temperature results archive (.npz). Defaults to
+                        output/ptemcee_results.npz. This is separate from the standardized ArviZ
+                        InferenceData output, which holds only the cold posterior chain.
+  --no-ptemcee-native-results
+                        Disable the extra ptemcee-native .npz archive; ArviZ output is still written.
   --serial-timing-test
   --MPI-timing-test
   --dynesty-run {static,single,dynamic}
@@ -171,6 +203,14 @@ black-box-bayes --input toy_config.pkl \
   --no-mpi --idata-results toy_emcee_idata.nc
 ```
 
+Or with parallel tempering:
+
+```bash
+black-box-bayes --input toy_config.pkl \
+  --sampler ptemcee --chains 16 --steps 1000 --ptemcee-ntemps 8 \
+  --no-mpi --idata-results toy_ptemcee_idata.nc
+```
+
 Inspect the output:
 
 ```python
@@ -202,6 +242,27 @@ Control the native archive with:
 ```
 
 The `.npz` archive stores array-like fields such as `samples`, `logl`, `logwt`, `logz`, `logzerr`, `logvol`, `ncall`, and any other portable array fields exposed by dynesty's `Results.asdict()`.
+
+## ptemcee outputs
+
+`ptemcee` runs an ensemble at multiple temperatures. Only the cold chain (inverse temperature `beta = 1`) is the target posterior, so the standard ArviZ NetCDF holds just that cold chain (walkers mapped to ArviZ chains, exactly like `emcee`). The full parallel-tempered representation and the thermodynamic-integration log-evidence estimate are preserved in a separate native `.npz` archive:
+
+```text
+ptemcee_idata.nc       # ArviZ cold-chain posterior view
+ptemcee_results.npz    # all-temperature chains + evidence estimate
+```
+
+Control the temperature ladder and native archive with:
+
+```bash
+--ptemcee-ntemps 8                     # number of temperatures
+--ptemcee-tmax inf                     # optional max temperature (inf recommended for adaptive PT)
+--no-ptemcee-adaptive                  # disable adaptive tempering (on by default)
+--ptemcee-native-results path/to/ptemcee_results.npz
+--no-ptemcee-native-results
+```
+
+The `.npz` archive stores `x` (shape `(draw, ntemps, walker, dim)`), the tempered `logl` and `logP` traces, the `betas` ladder, and the `log_evidence`/`log_evidence_err` estimate. A `ptemcee` run reuses the shared `--chains` (walkers), `--steps`, `--burnin`, `--batch-size`, `--rtol`, `--step-size` (proposal scale factor), and `--idata-discard`/`--idata-thin` flags.
 
 ## Tests
 

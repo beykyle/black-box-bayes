@@ -6,7 +6,8 @@ This driver expects ``--input`` to point at a pickled config-like object exposin
     ndim
     starting_location(nwalkers)
     log_posterior(theta)
-    log_likelihood(theta)       # required for dynesty
+    log_likelihood(theta)       # required for dynesty and ptemcee
+    log_prior(theta)            # required for ptemcee
     prior_transform(u)          # required for dynesty
     log_posterior_batch(thetas) # optional; used for timing only
     parameter_names             # optional
@@ -42,6 +43,7 @@ _CONFIG = None
 
 # Optional dependencies, imported only when needed.
 emcee = None
+ptemcee = None
 dynesty = None
 cloudpickle = None
 pymc = None
@@ -108,6 +110,10 @@ def _config_log_likelihood(theta):
     return _CONFIG.log_likelihood(theta)
 
 
+def _config_log_prior(theta):
+    return _CONFIG.log_prior(theta)
+
+
 def _config_prior_transform(u):
     return _CONFIG.prior_transform(u)
 
@@ -139,6 +145,8 @@ def _posterior_from_config(config_path: str | os.PathLike[str]):
 
     if hasattr(_CONFIG, "log_likelihood"):
         attrs["log_likelihood"] = _config_log_likelihood
+    if hasattr(_CONFIG, "log_prior"):
+        attrs["log_prior"] = _config_log_prior
     if hasattr(_CONFIG, "prior_transform"):
         attrs["prior_transform"] = _config_prior_transform
 
@@ -152,6 +160,16 @@ def _posterior_from_config(config_path: str | os.PathLike[str]):
 def _emcee_imports():
     global emcee
     emcee = _import_optional("emcee", "pip install emcee")
+
+
+def _ptemcee_imports():
+    global ptemcee
+    # ptemcee's thermodynamic-integration evidence uses np.trapz, which NumPy 2.0
+    # renamed to np.trapezoid and NumPy 2.x removed. Restore the alias so evidence
+    # estimation works under modern NumPy.
+    if not hasattr(np, "trapz") and hasattr(np, "trapezoid"):
+        np.trapz = np.trapezoid
+    ptemcee = _import_optional("ptemcee", "pip install ptemcee")
 
 
 def _dynesty_imports():
@@ -266,6 +284,11 @@ def _check_for_log_likelihood():
         raise AttributeError("The input object must expose log_likelihood(theta).")
 
 
+def _check_for_log_prior():
+    if not hasattr(posterior, "log_prior"):
+        raise AttributeError("The input object must expose log_prior(theta) for ptemcee.")
+
+
 def _check_for_prior_transform():
     if not hasattr(posterior, "prior_transform"):
         raise AttributeError("The input object must expose prior_transform(u) for dynesty.")
@@ -329,6 +352,22 @@ def _dynesty_native_results_path(args) -> Path | None:
     path = getattr(args, "dynesty_native_results", None)
     if path is None:
         path = Path(args.output) / "dynesty_results.npz"
+    return Path(path)
+
+
+def _ptemcee_native_results_path(args) -> Path | None:
+    """Return the ptemcee-native archive path, or None when disabled.
+
+    Like the dynesty equivalent, this is separate from ``--idata-results``: it
+    preserves the full parallel-tempered representation (all temperatures plus
+    the thermodynamic-integration evidence estimate) that does not fit the
+    cold-chain InferenceData output.
+    """
+    if getattr(args, "no_ptemcee_native_results", False):
+        return None
+    path = getattr(args, "ptemcee_native_results", None)
+    if path is None:
+        path = Path(args.output) / "ptemcee_results.npz"
     return Path(path)
 
 
@@ -406,7 +445,15 @@ def _write_idata(idata, path: Path) -> Path:
     """Write either ArviZ 0.x InferenceData or ArviZ 1.x DataTree."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    idata.to_netcdf(path)
+    try:
+        idata.to_netcdf(path)
+    except ValueError as exc:
+        # ArviZ 1.x InferenceData is a grouped xarray DataTree. xarray's default
+        # (scipy) NetCDF engine cannot write groups, so retry with a
+        # group-capable engine when one is installed.
+        if "group" not in str(exc).lower():
+            raise
+        idata.to_netcdf(path, engine="h5netcdf")
     return path
 
 
@@ -569,6 +616,94 @@ def _emcee_to_inferencedata(backend, args, runtime_seconds=None) -> az.Inference
         dims=dims,
         attrs=attrs,
     )
+
+
+def _ptemcee_evidence(chain):
+    """Return (log_evidence, log_evidence_err) or (None, None) if unavailable."""
+    try:
+        logz, logz_err = chain.log_evidence_estimate()
+        return float(logz), float(logz_err)
+    except Exception as exc:
+        print(f"Could not estimate ptemcee log evidence: {exc}", file=sys.stderr)
+        return None, None
+
+
+def _ptemcee_to_inferencedata(chain, args, runtime_seconds=None) -> az.InferenceData:
+    x = np.asarray(chain.x)
+    if x.ndim != 4:
+        raise RuntimeError(
+            f"Expected ptemcee chain shape (draw, ntemps, walker, dim), got {x.shape}."
+        )
+
+    # ptemcee stores (draw, ntemps, walker, dim). The cold chain (beta=1) at
+    # temperature index 0 is the target posterior. ArviZ expects
+    # (chain, draw, parameter), so map walkers -> chains like emcee does.
+    cold = x[:, 0, :, :][args.idata_discard :: args.idata_thin]
+    theta = np.moveaxis(cold, 0, 1)
+
+    sample_stats = {}
+    try:
+        logP = np.asarray(chain.logP)[:, 0, :][args.idata_discard :: args.idata_thin]
+        if logP.shape == cold.shape[:2]:
+            sample_stats["lp"] = np.moveaxis(logP, 0, 1)
+    except Exception as exc:
+        print(f"Could not include ptemcee log probabilities: {exc}", file=sys.stderr)
+
+    ntemps = int(x.shape[1])
+    logz, logz_err = _ptemcee_evidence(chain)
+    extra = {
+        "ptemcee_ntemps": ntemps,
+        "ptemcee_adaptive": bool(getattr(args, "ptemcee_adaptive", False)),
+        "ptemcee_walkers_as_arviz_chains": True,
+        "ptemcee_native_results": str(_ptemcee_native_results_path(args) or "disabled"),
+        "idata_discard": int(args.idata_discard),
+        "idata_thin": int(args.idata_thin),
+    }
+    if logz is not None:
+        extra["ptemcee_log_evidence"] = logz
+        extra["ptemcee_log_evidence_err"] = logz_err
+
+    coords, dims = _theta_coords_and_dims()
+    attrs = _common_attrs(args, "ptemcee", runtime_seconds=runtime_seconds, extra=extra)
+    return _inferencedata_from_arrays(
+        posterior_data={"theta": theta},
+        sample_stats_data=sample_stats or None,
+        coords=coords,
+        dims=dims,
+        attrs=attrs,
+    )
+
+
+def _write_ptemcee_native_results(chain, path: Path | None) -> Path | None:
+    """Write the full parallel-tempered chain arrays to ``.npz``.
+
+    ArviZ receives only the cold posterior chain. This archive preserves the
+    all-temperature representation: walker positions, tempered log-likelihood
+    and log-posterior traces, the temperature ladder, and the
+    thermodynamic-integration evidence estimate.
+    """
+    if path is None:
+        return None
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    arrays: dict[str, np.ndarray] = {}
+    for name in ("x", "logl", "logP", "betas"):
+        if hasattr(chain, name):
+            try:
+                arrays[name] = np.asarray(getattr(chain, name))
+            except Exception:
+                pass
+
+    logz, logz_err = _ptemcee_evidence(chain)
+    if logz is not None:
+        arrays["log_evidence"] = np.asarray(logz)
+        arrays["log_evidence_err"] = np.asarray(logz_err)
+
+    arrays["_format"] = np.asarray("black_box_bayes ptemcee native results npz")
+    np.savez_compressed(path, **arrays)
+    return path
 
 
 def _normalized_dynesty_weights(results) -> np.ndarray:
@@ -739,7 +874,7 @@ def parse_args(argv=None):
     parser.add_argument("--input", required=True, help="Path to pickled CalibrationConfig-like object.")
     parser.add_argument("--output", default="./", help="Output directory.")
     parser.add_argument("--idata-results", default=None, help="ArviZ InferenceData NetCDF output path.")
-    parser.add_argument("--sampler", choices=["emcee", "dynesty", "pymc"], default="emcee")
+    parser.add_argument("--sampler", choices=["emcee", "ptemcee", "dynesty", "pymc"], default="emcee")
 
     parser.add_argument("--no-mpi", action="store_true", help="Force serial execution even if MPI is installed.")
     parser.add_argument("--require-mpi", action="store_true", help="Fail unless running with mpi4py/schwimmbad and at least one worker rank.")
@@ -757,6 +892,28 @@ def parse_args(argv=None):
     parser.add_argument("--step-size", type=float, default=2.0)
     parser.add_argument("--rtol", type=float, default=0.01)
     parser.add_argument("--emcee-progress", action=argparse.BooleanOptionalAction, default=False)
+
+    # ptemcee (parallel tempering). Reuses --chains (walkers), --steps, --burnin,
+    # --batch-size, --rtol, --step-size (scale factor), --idata-discard/--idata-thin.
+    parser.add_argument("--ptemcee-ntemps", type=int, default=10, help="Number of ptemcee temperatures in the ladder.")
+    parser.add_argument("--ptemcee-tmax", type=float, default=None, help="Maximum ptemcee ladder temperature (e.g. inf for adaptive PT); default derives Tmax from --ptemcee-ntemps.")
+    parser.add_argument("--ptemcee-adaptive", action=argparse.BooleanOptionalAction, default=True, help="Enable adaptive parallel tempering.")
+    parser.add_argument("--ptemcee-progress", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--ptemcee-native-results",
+        type=str,
+        default=None,
+        help=(
+            "ptemcee-native all-temperature results archive (.npz). Defaults to "
+            "output/ptemcee_results.npz. This is separate from the standardized "
+            "ArviZ InferenceData output, which holds only the cold posterior chain."
+        ),
+    )
+    parser.add_argument(
+        "--no-ptemcee-native-results",
+        action="store_true",
+        help="Disable the extra ptemcee-native .npz archive; ArviZ output is still written.",
+    )
 
     parser.add_argument("--serial-timing-test", action="store_true")
     parser.add_argument("--MPI-timing-test", action="store_true")
@@ -821,6 +978,7 @@ def parse_args(argv=None):
         ("--pymc-chains", args.pymc_chains),
         ("--steps", args.steps),
         ("--batch-size", args.batch_size),
+        ("--ptemcee-ntemps", args.ptemcee_ntemps),
         ("--idata-thin", args.idata_thin),
         ("--nlive", args.nlive),
         ("--nlive-batch", args.nlive_batch),
@@ -837,6 +995,8 @@ def parse_args(argv=None):
         parser.error("--pymc-tune must be non-negative.")
     if not 0.0 <= args.dynesty_pfrac <= 1.0:
         parser.error("--dynesty-pfrac must be between 0 and 1.")
+    if args.ptemcee_tmax is not None and args.ptemcee_tmax <= 1.0:
+        parser.error("--ptemcee-tmax must be greater than 1.")
     if args.no_mpi and args.require_mpi:
         parser.error("--no-mpi and --require-mpi are mutually exclusive.")
 
@@ -851,6 +1011,115 @@ def _require_emcee_args(args):
         raise ValueError(
             f"emcee StretchMove needs at least 2*ndim walkers; got {args.chains}, ndim={posterior.NDIM}."
         )
+
+
+def _require_ptemcee_args(args):
+    if args.chains is None:
+        raise ValueError("--chains is required for ptemcee; it is the number of walkers per temperature.")
+    _require_steps(args, "ptemcee")
+    if args.chains % 2 != 0:
+        raise ValueError(f"ptemcee requires an even number of walkers; got --chains={args.chains}.")
+    if args.chains < 2 * posterior.NDIM:
+        raise ValueError(
+            f"ptemcee needs at least 2*ndim walkers; got {args.chains}, ndim={posterior.NDIM}."
+        )
+
+
+def _ptemcee_beta_ladder(args):
+    """Build an explicit temperature ladder via ptemcee.make_ladder.
+
+    The fork rejects ``betas=None``/``betas=<int>`` in its attrs validator, so
+    we always pass a concrete ladder array.
+    """
+    kwargs = {}
+    if args.ptemcee_ntemps is not None:
+        kwargs["ntemps"] = int(args.ptemcee_ntemps)
+    if args.ptemcee_tmax is not None:
+        kwargs["Tmax"] = float(args.ptemcee_tmax)
+    return np.asarray(ptemcee.make_ladder(int(posterior.NDIM), **kwargs), dtype=float)
+
+
+def run_ptemcee(args, pool, size=1):
+    _ptemcee_imports()
+    _require_ptemcee_args(args)
+    _check_for_log_likelihood()
+    _check_for_log_prior()
+    output_path = Path(args.output)
+    output_path.mkdir(parents=True, exist_ok=True)
+    idata_path = _idata_results_path(args, "ptemcee")
+    native_path = _ptemcee_native_results_path(args)
+
+    betas = _ptemcee_beta_ladder(args)
+    ntemps = len(betas)
+    sampler = ptemcee.Sampler(
+        args.chains,
+        int(posterior.NDIM),
+        posterior.log_likelihood,
+        posterior.log_prior,
+        betas=betas,
+        adaptive=args.ptemcee_adaptive,
+        scale_factor=args.step_size,
+        mapper=pool.map,
+    )
+
+    # ptemcee starting positions are shaped (ntemps, nwalkers, ndim).
+    p0 = np.stack([_check_starting_location(args.chains) for _ in range(ntemps)])
+
+    print(
+        f"Running ptemcee: walkers={args.chains}, ntemps={ntemps}, steps={args.steps}, "
+        f"ndim={posterior.NDIM}, adaptive={args.ptemcee_adaptive}, mpi_ranks={size}."
+    )
+    print(f"ptemcee native results: {native_path if native_path is not None else 'disabled'}")
+    sys.stdout.flush()
+
+    if args.burnin:
+        print(f"Running ptemcee burn-in for {args.burnin} steps (discarded)...")
+        burn_chain = sampler.chain(p0)
+        burn_chain.run(args.burnin)
+        p0 = np.asarray(burn_chain.ensemble.x)
+        print("Burn-in complete; starting production chain.")
+
+    chain = sampler.chain(p0)
+    chunk = args.batch_size or args.steps
+    old_tau = None
+    remaining = args.steps
+    t0 = time()
+    while remaining > 0:
+        step = min(chunk, remaining)
+        chain.run(step)
+        remaining -= step
+        if args.ptemcee_progress:
+            print(f"ptemcee step {args.steps - remaining}/{args.steps}")
+            sys.stdout.flush()
+        try:
+            # Cold-chain autocorrelation time, averaged over parameters.
+            tau = np.asarray(chain.get_acts())[0]
+        except Exception as exc:
+            print(f"Autocorr estimate unavailable at step {args.steps - remaining}: {exc}")
+            sys.stdout.flush()
+            continue
+        done = args.steps - remaining
+        print(f"Step {done}: mean cold-chain autocorr time = {np.mean(tau):.2f}")
+        if old_tau is not None:
+            converged = np.all(tau * 100 < done)
+            converged &= np.all(np.abs(old_tau - tau) / np.maximum(tau, 1e-300) < args.rtol)
+            if converged:
+                print(f"Cold chain converged after {done} steps.")
+                break
+        old_tau = tau
+        sys.stdout.flush()
+
+    dt = time() - t0
+    idata = _ptemcee_to_inferencedata(chain, args, runtime_seconds=dt)
+    _write_idata(idata, idata_path)
+    written_native_path = _write_ptemcee_native_results(chain, native_path)
+    logz, logz_err = _ptemcee_evidence(chain)
+    if logz is not None:
+        print(f"ptemcee log-evidence estimate: {logz:.3f} +/- {logz_err:.3f}")
+    print(f"ptemcee sampling took {_dt.timedelta(seconds=dt)}")
+    print(f"Saved ArviZ InferenceData to {idata_path}")
+    if written_native_path is not None:
+        print(f"Saved ptemcee-native all-temperature results to {written_native_path}")
 
 
 def run_emcee(args, pool, size=1):
@@ -1102,6 +1371,19 @@ def _warmup_and_validate(args):
         p0 = _check_starting_location(args.chains)
         _check_logp(p0[0])
         return p0
+    if sampler == "ptemcee":
+        _ptemcee_imports()
+        _require_ptemcee_args(args)
+        _check_for_log_likelihood()
+        _check_for_log_prior()
+        p0 = _check_starting_location(args.chains)
+        ll = float(posterior.log_likelihood(p0[0]))
+        lp = float(posterior.log_prior(p0[0]))
+        if np.isnan(ll):
+            raise ValueError("posterior.log_likelihood returned NaN at the warmup point.")
+        if np.isnan(lp):
+            raise ValueError("posterior.log_prior returned NaN at the warmup point.")
+        return p0
     if sampler == "dynesty":
         _dynesty_imports()
         _check_for_log_likelihood()
@@ -1123,7 +1405,7 @@ def _warmup_and_validate(args):
 
 def _serial_timing(args, warm_point):
     t0 = time()
-    if args.sampler == "emcee":
+    if args.sampler in ("emcee", "ptemcee"):
         if hasattr(posterior, "log_posterior_batch"):
             posterior.log_posterior_batch(warm_point)
             label = f"{len(warm_point)} batched log_posterior calls"
@@ -1146,13 +1428,13 @@ def _mpi_timing(args, pool, size):
         raise RuntimeError("--MPI-timing-test requires at least one MPI worker rank.")
     nworkers = size - 1
     t0 = time()
-    if args.sampler == "emcee":
+    if args.sampler in ("emcee", "ptemcee"):
         base, rem = divmod(args.chains, nworkers)
         counts = [base + (i < rem) for i in range(nworkers)]
         inputs = [_check_starting_location(n) for n in counts if n > 0]
         func = posterior.log_posterior_batch if hasattr(posterior, "log_posterior_batch") else lambda xs: [posterior.log_posterior(x) for x in xs]
         pool.map(func, inputs)
-        label = f"{sum(counts)} emcee log_posterior samples on {nworkers} workers"
+        label = f"{sum(counts)} {args.sampler} log_posterior samples on {nworkers} workers"
     elif args.sampler == "dynesty":
         us = [np.random.default_rng(i).random(posterior.NDIM) for i in range(nworkers)]
         thetas = [posterior.prior_transform(u) for u in us]
@@ -1188,6 +1470,8 @@ def main(argv=None):
 
         if args.sampler == "emcee":
             run_emcee(args, pool, size=size)
+        elif args.sampler == "ptemcee":
+            run_ptemcee(args, pool, size=size)
         elif args.sampler == "dynesty":
             run_dynesty(args, pool, size=size)
         elif args.sampler == "pymc":
