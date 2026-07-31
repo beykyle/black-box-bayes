@@ -20,16 +20,33 @@ dependencies = [
 
 [project.optional-dependencies]
 emcee = ["emcee>=3", "h5py>=3"]
-# The v2 (attrs-based) ptemcee API is required. PyPI ptemcee>=1.0 provides it;
-# to use the NuclearTalent fork instead: pip install git+https://github.com/NuclearTalent/ptemcee_2025
-ptemcee = ["ptemcee>=1.0"]
+# The v2 (attrs-based) ptemcee API is required -- the CLI calls ptemcee.make_ladder()
+# and Chain.log_evidence_estimate().
+#
+# PyPI's `ptemcee` does NOT provide it. The PyPI package also self-reports version
+# 1.0.0, but it is the older API (`default_beta_ladder`, no `make_ladder`), so
+# `ptemcee>=1.0` installs something that imports fine and then fails at run time with
+# `module 'ptemcee' has no attribute 'make_ladder'`. Pin the fork instead.
+#
+# Same PyPI caveat as the jitr pin below: a direct reference makes this project
+# unuploadable to PyPI, so if it is ever published this moves to a requirements file.
+ptemcee = [
+  "ptemcee @ git+https://github.com/NuclearTalent/ptemcee_2025@de76a0ea966765f27aaeb41d2bde4bb7a5ffea33",
+]
 dynesty = ["dynesty>=2"]
 pymc = ["pymc>=5", "cloudpickle>=2", "pytensor>=2"]
 mpi = ["mpi4py>=3", "schwimmbad>=0.3"]
-test = ["pytest>=7", "emcee>=3", "ptemcee>=1.0", "h5py>=3", "h5netcdf>=1"]
+# Dependencies of examples/. 
+examples = [
+  "matplotlib>=3.7",
+  "corner>=2.2",
+  "jupyter>=1",
+  "ipykernel>=6",
+]
+test = ["pytest>=7", "emcee>=3", "ptemcee @ git+https://github.com/NuclearTalent/ptemcee_2025@de76a0ea966765f27aaeb41d2bde4bb7a5ffea33", "h5py>=3", "h5netcdf>=1"]
 all = [
   "emcee>=3", "h5py>=3",
-  "ptemcee>=1.0",
+  "ptemcee @ git+https://github.com/NuclearTalent/ptemcee_2025@de76a0ea966765f27aaeb41d2bde4bb7a5ffea33",
   "dynesty>=2",
   "pymc>=5", "cloudpickle>=2", "pytensor>=2",
   "mpi4py>=3", "schwimmbad>=0.3",

@@ -25,3 +25,7 @@ output/
 
 # Toy example generated files
 examples/toy/toy_config.pkl
+.ipynb_checkpoints/
+
+# NFS leaves these behind for files deleted while still open
+.nfs*

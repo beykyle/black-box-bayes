@@ -21,6 +21,7 @@ import argparse
 import datetime as _dt
 import importlib
 import inspect
+import multiprocessing
 import os
 import sys
 from pathlib import Path
@@ -73,6 +74,58 @@ class SerialPool:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
+        return False
+
+
+def _mp_init(config_path):
+    """Initializer for multiprocessing workers.
+
+    Under ``fork`` the child already inherits the parent's ``_CONFIG`` (including a built
+    workspace, which for heavy forward models is the expensive part), so this is a no-op.
+    Under ``spawn`` -- the default on macOS and Windows -- the child starts from a bare
+    interpreter and *must* rebuild it, or every evaluation fails.
+    """
+    if _CONFIG is None:
+        _posterior_from_config(config_path)
+
+
+class MultiprocessingPool:
+    """multiprocessing.Pool behind the same API as SerialPool.
+
+    Workers are plain child processes rather than MPI ranks, so there is no master/worker
+    split to negotiate: ``is_master`` is always True and ``wait`` never blocks.
+    """
+
+    def __init__(self, nprocs: int, config_path=None):
+        self.size = nprocs
+        # Prefer fork where available: children inherit the built config for free.
+        method = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+        ctx = multiprocessing.get_context(method)
+        self.start_method = method
+        self._pool = ctx.Pool(nprocs, initializer=_mp_init, initargs=(config_path,))
+
+    def map(self, func, iterable):
+        return self._pool.map(func, iterable)
+
+    def is_master(self):
+        return True
+
+    def wait(self):
+        return None
+
+    def close(self):
+        self._pool.close()
+        self._pool.join()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            self._pool.terminate()
+            self._pool.join()
+        else:
+            self.close()
         return False
 
 
@@ -210,20 +263,50 @@ def _mpi_size() -> int:
     return 1
 
 
+def _resolve_nprocs(args) -> int:
+    if args.nprocs is not None:
+        return args.nprocs
+    return max(os.cpu_count() or 1, 1)
+
+
 def _pool_context(args):
-    """Return an MPI pool when requested/available, otherwise a serial pool."""
-    if args.no_mpi:
+    """Return (pool, size, using_mpi) for the requested execution mode.
+
+    ``size`` is the worker count as the samplers understand it: for MPI that includes the
+    master rank (which does not evaluate), for multiprocessing it does not.
+    """
+    mode = getattr(args, "pool", "auto")
+    if args.no_mpi and mode == "auto":
+        mode = "serial"
+    if args.require_mpi and mode == "auto":
+        mode = "mpi"
+
+    if mode == "serial":
         return SerialPool(), 1, False
-    mpi_available = _mpi_imports(required=args.require_mpi)
+
+    if mode == "multiprocessing":
+        nprocs = _resolve_nprocs(args)
+        if nprocs < 2:
+            return SerialPool(), 1, False
+        pool = MultiprocessingPool(nprocs, config_path=args.input)
+        print(
+            f"Using multiprocessing pool: {nprocs} workers, start method "
+            f"'{pool.start_method}'.",
+            flush=True,
+        )
+        return pool, nprocs, False
+
+    # auto / mpi
+    mpi_available = _mpi_imports(required=args.require_mpi or mode == "mpi")
     if not mpi_available:
         return SerialPool(), 1, False
 
     size = MPI.COMM_WORLD.Get_size()
     if size < 2:
-        if args.require_mpi:
+        if args.require_mpi or mode == "mpi":
             raise RuntimeError(
-                "--require-mpi was set, but only one MPI rank is available. "
-                "Run with e.g. `mpiexec -n 4 python bayes_driver_unified.py ...`."
+                "MPI mode was requested, but only one MPI rank is available. "
+                "Run with e.g. `mpiexec -n 4 black-box-bayes ...`."
             )
         return SerialPool(), 1, False
 
@@ -526,6 +609,35 @@ def _inferencedata_from_arrays(
     if attrs:
         _add_attrs_to_idata(idata, attrs)
     return idata
+
+def _concat_traces_along_chain(traces):
+    """Join single-chain traces into one result, across the ArviZ 0.x -> 1.x boundary.
+
+    ArviZ 0.x provides ``az.concat``. In 1.x ``arviz.InferenceData`` aliases xarray's
+    ``DataTree`` and ``az.concat`` no longer exists, so the groups are concatenated
+    directly. Groups without a ``chain`` dimension (``observed_data`` and friends) are
+    identical across chains, so the first one is kept.
+    """
+    if len(traces) == 1:
+        return traces[0]
+
+    concat = getattr(az, "concat", None)
+    if concat is not None:
+        return concat(*traces, dim="chain")
+
+    groups: dict[str, Any] = {}
+    for name in traces[0].children:
+        datasets = [t[name].to_dataset() for t in traces if name in t.children]
+        if not datasets:
+            continue
+        if "chain" in datasets[0].dims:
+            merged = xr.concat(datasets, dim="chain")
+            merged = merged.assign_coords(chain=np.arange(merged.sizes["chain"]))
+        else:
+            merged = datasets[0]
+        groups[name] = merged
+    return xr.DataTree.from_dict(groups)
+
 
 def _netcdf_attr_value(value):
     if isinstance(value, (bool, np.bool_)):
@@ -876,8 +988,24 @@ def parse_args(argv=None):
     parser.add_argument("--idata-results", default=None, help="ArviZ InferenceData NetCDF output path.")
     parser.add_argument("--sampler", choices=["emcee", "ptemcee", "dynesty", "pymc"], default="emcee")
 
-    parser.add_argument("--no-mpi", action="store_true", help="Force serial execution even if MPI is installed.")
-    parser.add_argument("--require-mpi", action="store_true", help="Fail unless running with mpi4py/schwimmbad and at least one worker rank.")
+    parser.add_argument(
+        "--pool",
+        choices=["auto", "serial", "mpi", "multiprocessing"],
+        default="auto",
+        help=(
+            "Parallel execution mode. 'auto' (default) uses MPI when running under a "
+            "multi-rank launcher and falls back to serial. 'multiprocessing' spreads "
+            "likelihood evaluations over local cores without MPI -- use this on a laptop."
+        ),
+    )
+    parser.add_argument(
+        "--nprocs",
+        type=int,
+        default=None,
+        help="Worker processes for --pool multiprocessing (default: os.cpu_count()).",
+    )
+    parser.add_argument("--no-mpi", action="store_true", help="Force serial execution even if MPI is installed. Equivalent to --pool serial.")
+    parser.add_argument("--require-mpi", action="store_true", help="Fail unless running with mpi4py/schwimmbad and at least one worker rank. Equivalent to --pool mpi.")
 
     parser.add_argument("--chains", type=int, default=None, help="emcee walkers or PyMC chains.")
     parser.add_argument("--pymc-chains", type=int, default=None, help="PyMC chains, overriding --chains.")
@@ -969,7 +1097,12 @@ def parse_args(argv=None):
     parser.add_argument("--pymc-progress", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--pymc-target-accept", type=float, default=None)
     parser.add_argument("--pymc-results", type=str, default=None, help="Deprecated alias for --idata-results in PyMC mode.")
-    parser.add_argument("--pymc-random-seed", type=int, default=None)
+    parser.add_argument(
+        "--pymc-random-seed",
+        type=int,
+        default=None,
+        help="Base seed for PyMC chains (chain i gets seed+i). Defaults to --seed.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -983,6 +1116,7 @@ def parse_args(argv=None):
         ("--nlive", args.nlive),
         ("--nlive-batch", args.nlive_batch),
         ("--queue-size", args.queue_size),
+        ("--nprocs", args.nprocs),
     ]
     for name, value in positive:
         if value is not None and value <= 0:
@@ -999,6 +1133,17 @@ def parse_args(argv=None):
         parser.error("--ptemcee-tmax must be greater than 1.")
     if args.no_mpi and args.require_mpi:
         parser.error("--no-mpi and --require-mpi are mutually exclusive.")
+    if args.pool != "auto":
+        if args.no_mpi and args.pool != "serial":
+            parser.error(f"--no-mpi contradicts --pool {args.pool}.")
+        if args.require_mpi and args.pool != "mpi":
+            parser.error(f"--require-mpi contradicts --pool {args.pool}.")
+    if args.nprocs is not None and args.pool != "multiprocessing":
+        parser.error("--nprocs only applies to --pool multiprocessing.")
+    # --seed means "make this run reproducible", so it supplies PyMC's seed too unless
+    # --pymc-random-seed overrides it explicitly.
+    if args.pymc_random_seed is None and args.seed is not None:
+        args.pymc_random_seed = args.seed
 
     return args
 
@@ -1051,6 +1196,11 @@ def run_ptemcee(args, pool, size=1):
 
     betas = _ptemcee_beta_ladder(args)
     ntemps = len(betas)
+    # ptemcee builds an unseeded RandomState per chain unless one is handed in. A single
+    # instance is threaded through burn-in and production so the production stream
+    # continues rather than replaying the burn-in draws.
+    seed = getattr(args, "seed", None)
+    rstate = np.random.mtrand.RandomState(seed) if seed is not None else None
     sampler = ptemcee.Sampler(
         args.chains,
         int(posterior.NDIM),
@@ -1074,12 +1224,12 @@ def run_ptemcee(args, pool, size=1):
 
     if args.burnin:
         print(f"Running ptemcee burn-in for {args.burnin} steps (discarded)...")
-        burn_chain = sampler.chain(p0)
+        burn_chain = sampler.chain(p0, random=rstate)
         burn_chain.run(args.burnin)
         p0 = np.asarray(burn_chain.ensemble.x)
         print("Burn-in complete; starting production chain.")
 
-    chain = sampler.chain(p0)
+    chain = sampler.chain(p0, random=rstate)
     chunk = args.batch_size or args.steps
     old_tau = None
     remaining = args.steps
@@ -1265,11 +1415,18 @@ def run_dynesty(args, pool, size=1):
     checkpoint_path = Path(args.dynesty_checkpoint) if args.dynesty_checkpoint else output_path / "dynesty_checkpoint.pkl"
     idata_path = _idata_results_path(args, "dynesty")
     native_path = _dynesty_native_results_path(args)
-    queue_size = args.queue_size or max(size - 1, 1)
+    if args.queue_size:
+        queue_size = args.queue_size
+    elif isinstance(pool, MultiprocessingPool):
+        # Every process in a multiprocessing pool evaluates; there is no master rank
+        # sitting out, so the queue is the full worker count rather than size - 1.
+        queue_size = pool.size
+    else:
+        queue_size = max(size - 1, 1)
 
     print(
         f"Running dynesty: run={args.dynesty_run}, nlive={args.nlive}, ndim={posterior.NDIM}, "
-        f"queue_size={queue_size}, mpi_ranks={size}."
+        f"queue_size={queue_size}, workers={size}."
     )
     print(f"Dynesty native results: {native_path if native_path is not None else 'disabled'}")
     if args.dynesty_resume and checkpoint_path.exists():
@@ -1347,10 +1504,7 @@ def run_pymc(args, pool, size=1):
     traces = pool.map(_run_pymc_chain, payloads)
     dt = time() - t0
 
-    if len(traces) == 1:
-        trace = traces[0]
-    else:
-        trace = az.concat(*traces, dim="chain")
+    trace = _concat_traces_along_chain(traces)
     _add_attrs_to_idata(trace, _common_attrs(args, "pymc", runtime_seconds=dt))
     _write_idata(trace, idata_path)
     print(f"PyMC sampling took {_dt.timedelta(seconds=dt)}")
@@ -1448,9 +1602,29 @@ def _mpi_timing(args, pool, size):
     print(f"{label} in {_dt.timedelta(seconds=dt)} [hh:mm:ss]")
 
 
+def _seed_global_rng(args):
+    """Make --seed actually mean "reproducible", for every sampler.
+
+    Each backend takes its randomness from a different place:
+
+      dynesty   an rstate= Generator, passed explicitly
+      ptemcee   a random= RandomState, passed explicitly
+      emcee     an internal RandomState seeded from numpy's *legacy global* state at
+                construction time -- so seeding that global here is the only hook
+      pymc      random_seed=, via --pymc-random-seed
+
+    Starting positions are a separate matter: they come from the config's
+    starting_location(), so a config with its own RNG governs those regardless of --seed.
+    """
+    if args.seed is None:
+        return
+    np.random.seed(args.seed)
+
+
 def main(argv=None):
     global posterior
     args = parse_args(argv)
+    _seed_global_rng(args)
     posterior = _posterior_from_config(args.input)
     warm_point = _warmup_and_validate(args)
 

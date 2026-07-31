@@ -225,8 +225,9 @@ def test_run_ptemcee_builds_ladder_and_writes_outputs(monkeypatch, tmp_path):
             records["adaptive"] = adaptive
             records["mapper"] = mapper
 
-        def chain(self, p0):
+        def chain(self, p0, random=None, thin_by=None):
             records["p0_shape"] = np.asarray(p0).shape
+            records["random"] = random
             return FakeChain(p0)
 
     def fake_make_ladder(ndim, ntemps=None, Tmax=None):
@@ -255,11 +256,14 @@ def test_run_ptemcee_builds_ladder_and_writes_outputs(monkeypatch, tmp_path):
         ptemcee_progress=False,
         ptemcee_native_results=None,
         no_ptemcee_native_results=False,
+        seed=None,
     )
 
     cli.run_ptemcee(args, cli.SerialPool(), size=1)
 
     assert records["nwalkers"] == 4
+    # No --seed: ptemcee is left to build its own RandomState.
+    assert records["random"] is None
     assert records["ndim"] == 2
     assert records["ladder_ntemps"] == 3
     assert records["p0_shape"] == (3, 4, 2)  # (ntemps, nwalkers, ndim)

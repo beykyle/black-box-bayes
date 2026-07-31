@@ -70,40 +70,36 @@ black-box-bayes --help
 prints:
 
 ```
-usage: black-box-bayes [-h] --input INPUT [--output OUTPUT]
-                       [--idata-results IDATA_RESULTS] [--sampler {emcee,ptemcee,dynesty,pymc}] [--no-mpi] [--require-mpi]
-                       [--chains CHAINS] [--pymc-chains PYMC_CHAINS] [--steps STEPS] [--idata-discard IDATA_DISCARD]
-                       [--idata-thin IDATA_THIN] [--emcee-backend EMCEE_BACKEND] [--burnin BURNIN]
-                       [--batch-size BATCH_SIZE] [--step-size STEP_SIZE] [--rtol RTOL]
-                       [--emcee-progress | --no-emcee-progress]
-                       [--ptemcee-ntemps PTEMCEE_NTEMPS] [--ptemcee-tmax PTEMCEE_TMAX]
-                       [--ptemcee-adaptive | --no-ptemcee-adaptive] [--ptemcee-progress | --no-ptemcee-progress]
-                       [--ptemcee-native-results PTEMCEE_NATIVE_RESULTS] [--no-ptemcee-native-results]
-                       [--serial-timing-test] [--MPI-timing-test]
-                       [--dynesty-run {static,single,dynamic}] [--nlive NLIVE] [--nlive-batch NLIVE_BATCH]
-                       [--dynesty-bound {none,single,multi,balls,cubes}]
-                       [--dynesty-sample {auto,unif,rwalk,slice,rslice}] [--dynesty-walks DYNESTY_WALKS]
-                       [--dynesty-slices DYNESTY_SLICES] [--dynesty-facc DYNESTY_FACC]
-                       [--dynesty-bootstrap DYNESTY_BOOTSTRAP] [--dynesty-enlarge DYNESTY_ENLARGE]
-                       [--dynesty-update-interval DYNESTY_UPDATE_INTERVAL] [--dlogz DLOGZ] [--dlogz-init DLOGZ_INIT]
-                       [--maxiter MAXITER] [--maxcall MAXCALL] [--maxbatch MAXBATCH] [--n-effective N_EFFECTIVE]
-                       [--dynesty-pfrac DYNESTY_PFRAC] [--dynesty-use-stop | --no-dynesty-use-stop]
-                       [--add-live | --no-add-live] [--dynesty-progress | --no-dynesty-progress]
-                       [--queue-size QUEUE_SIZE] [--dynesty-checkpoint DYNESTY_CHECKPOINT]
-                       [--dynesty-checkpoint-every DYNESTY_CHECKPOINT_EVERY] [--dynesty-resume]
-                       [--dynesty-results DYNESTY_RESULTS] [--dynesty-native-results DYNESTY_NATIVE_RESULTS]
-                       [--no-dynesty-native-results] [--dynesty-history DYNESTY_HISTORY]
-                       [--dynesty-equal-weight | --no-dynesty-equal-weight] [--seed SEED] [--pymc-tune PYMC_TUNE]
-                       [--pymc-step {demetropolisz,demetropolis,metropolis}]
-                       [--pymc-init {prior_mean,starting_location,random_prior}]
-                       [--pymc-progress | --no-pymc-progress] [--pymc-target-accept PYMC_TARGET_ACCEPT]
-                       [--pymc-results PYMC_RESULTS] [--pymc-random-seed PYMC_RANDOM_SEED]
+usage: __main__.py [-h] --input INPUT [--output OUTPUT] [--idata-results IDATA_RESULTS]
+                   [--sampler {emcee,ptemcee,dynesty,pymc}] [--pool {auto,serial,mpi,multiprocessing}]
+                   [--nprocs NPROCS] [--no-mpi] [--require-mpi] [--chains CHAINS] [--pymc-chains PYMC_CHAINS]
+                   [--steps STEPS] [--idata-discard IDATA_DISCARD] [--idata-thin IDATA_THIN]
+                   [--emcee-backend EMCEE_BACKEND] [--burnin BURNIN] [--batch-size BATCH_SIZE] [--step-size STEP_SIZE]
+                   [--rtol RTOL] [--emcee-progress | --no-emcee-progress] [--ptemcee-ntemps PTEMCEE_NTEMPS]
+                   [--ptemcee-tmax PTEMCEE_TMAX] [--ptemcee-adaptive | --no-ptemcee-adaptive]
+                   [--ptemcee-progress | --no-ptemcee-progress] [--ptemcee-native-results PTEMCEE_NATIVE_RESULTS]
+                   [--no-ptemcee-native-results] [--serial-timing-test] [--MPI-timing-test]
+                   [--dynesty-run {static,single,dynamic}] [--nlive NLIVE] [--nlive-batch NLIVE_BATCH]
+                   [--dynesty-bound {none,single,multi,balls,cubes}] [--dynesty-sample {auto,unif,rwalk,slice,rslice}]
+                   [--dynesty-walks DYNESTY_WALKS] [--dynesty-slices DYNESTY_SLICES] [--dynesty-facc DYNESTY_FACC]
+                   [--dynesty-bootstrap DYNESTY_BOOTSTRAP] [--dynesty-enlarge DYNESTY_ENLARGE]
+                   [--dynesty-update-interval DYNESTY_UPDATE_INTERVAL] [--dlogz DLOGZ] [--dlogz-init DLOGZ_INIT]
+                   [--maxiter MAXITER] [--maxcall MAXCALL] [--maxbatch MAXBATCH] [--n-effective N_EFFECTIVE]
+                   [--dynesty-pfrac DYNESTY_PFRAC] [--dynesty-use-stop | --no-dynesty-use-stop]
+                   [--add-live | --no-add-live] [--dynesty-progress | --no-dynesty-progress] [--queue-size QUEUE_SIZE]
+                   [--dynesty-checkpoint DYNESTY_CHECKPOINT] [--dynesty-checkpoint-every DYNESTY_CHECKPOINT_EVERY]
+                   [--dynesty-resume] [--dynesty-results DYNESTY_RESULTS]
+                   [--dynesty-native-results DYNESTY_NATIVE_RESULTS] [--no-dynesty-native-results]
+                   [--dynesty-history DYNESTY_HISTORY] [--dynesty-equal-weight | --no-dynesty-equal-weight]
+                   [--seed SEED] [--pymc-tune PYMC_TUNE] [--pymc-step {demetropolisz,demetropolis,metropolis}]
+                   [--pymc-init {prior_mean,starting_location,random_prior}] [--pymc-progress | --no-pymc-progress]
+                   [--pymc-target-accept PYMC_TARGET_ACCEPT] [--pymc-results PYMC_RESULTS]
+                   [--pymc-random-seed PYMC_RANDOM_SEED]
 
-Unified black-box Bayesian inference driver. This driver expects --input to point at a pickled
-config-like object exposing: ndim starting_location(nwalkers) log_posterior(theta)
-log_likelihood(theta) # required for dynesty and ptemcee log_prior(theta) # required for ptemcee
-prior_transform(u) # required for dynesty log_posterior_batch(thetas) # optional; used for timing only
-parameter_names # optional All samplers write an ArviZ InferenceData NetCDF file.
+Unified black-box Bayesian inference driver. This driver expects ``--input`` to point at a pickled config-like object
+exposing: ndim starting_location(nwalkers) log_posterior(theta) log_likelihood(theta) # required for dynesty and
+ptemcee log_prior(theta) # required for ptemcee prior_transform(u) # required for dynesty log_posterior_batch(thetas)
+# optional; used for timing only parameter_names # optional All samplers write an ArviZ InferenceData NetCDF file.
 
 options:
   -h, --help            show this help message and exit
@@ -112,8 +108,14 @@ options:
   --idata-results IDATA_RESULTS
                         ArviZ InferenceData NetCDF output path.
   --sampler {emcee,ptemcee,dynesty,pymc}
-  --no-mpi              Force serial execution even if MPI is installed.
-  --require-mpi         Fail unless running with mpi4py/schwimmbad and at least one worker rank.
+  --pool {auto,serial,mpi,multiprocessing}
+                        Parallel execution mode. 'auto' (default) uses MPI when running under a multi-rank launcher
+                        and falls back to serial. 'multiprocessing' spreads likelihood evaluations over local cores
+                        without MPI -- use this on a laptop.
+  --nprocs NPROCS       Worker processes for --pool multiprocessing (default: os.cpu_count()).
+  --no-mpi              Force serial execution even if MPI is installed. Equivalent to --pool serial.
+  --require-mpi         Fail unless running with mpi4py/schwimmbad and at least one worker rank. Equivalent to --pool
+                        mpi.
   --chains CHAINS       emcee walkers or PyMC chains.
   --pymc-chains PYMC_CHAINS
                         PyMC chains, overriding --chains.
@@ -132,15 +134,15 @@ options:
   --ptemcee-ntemps PTEMCEE_NTEMPS
                         Number of ptemcee temperatures in the ladder.
   --ptemcee-tmax PTEMCEE_TMAX
-                        Maximum ptemcee ladder temperature (e.g. inf for adaptive PT); default derives Tmax
-                        from --ptemcee-ntemps.
+                        Maximum ptemcee ladder temperature (e.g. inf for adaptive PT); default derives Tmax from
+                        --ptemcee-ntemps.
   --ptemcee-adaptive, --no-ptemcee-adaptive
                         Enable adaptive parallel tempering.
   --ptemcee-progress, --no-ptemcee-progress
   --ptemcee-native-results PTEMCEE_NATIVE_RESULTS
-                        ptemcee-native all-temperature results archive (.npz). Defaults to
-                        output/ptemcee_results.npz. This is separate from the standardized ArviZ
-                        InferenceData output, which holds only the cold posterior chain.
+                        ptemcee-native all-temperature results archive (.npz). Defaults to output/ptemcee_results.npz.
+                        This is separate from the standardized ArviZ InferenceData output, which holds only the cold
+                        posterior chain.
   --no-ptemcee-native-results
                         Disable the extra ptemcee-native .npz archive; ArviZ output is still written.
   --serial-timing-test
@@ -189,9 +191,63 @@ options:
   --pymc-results PYMC_RESULTS
                         Deprecated alias for --idata-results in PyMC mode.
   --pymc-random-seed PYMC_RANDOM_SEED
-
+                        Base seed for PyMC chains (chain i gets seed+i). Defaults to --seed.
 ```
 
+
+## Parallelism
+
+`--pool` selects how likelihood evaluations are spread. The default, `auto`, uses MPI when
+launched under a multi-rank launcher and silently falls back to serial otherwise.
+
+```bash
+# laptop: N local worker processes, no MPI needed
+black-box-bayes --input cfg.pkl --pool multiprocessing --nprocs 8 ...
+
+# cluster: one master rank plus N-1 workers
+mpiexec -n 64 black-box-bayes --input cfg.pkl --pool mpi ...
+```
+
+`--no-mpi` and `--require-mpi` still work and are equivalent to `--pool serial` and
+`--pool mpi`.
+
+Two things differ between the MPI and multiprocessing paths:
+
+- **Worker accounting.** Under MPI, rank 0 coordinates and does not evaluate, so `N` ranks
+  give `N-1` workers. A multiprocessing pool has no master, so `--nprocs N` gives `N`
+  workers. dynesty's `--queue-size` defaults accordingly; override it explicitly if you
+  want a specific value.
+- **Worker startup.** On Linux the pool forks after the config is loaded, so workers
+  inherit an already-built model for free. On macOS and Windows Python spawns instead, and
+  each worker reconstructs the config independently — for an expensive forward model that
+  is a real per-worker startup cost, paid concurrently. Configs must be picklable either
+  way.
+
+If your forward model is itself threaded, pin it to one thread per worker
+(`OMP_NUM_THREADS=1`, `NUMBA_NUM_THREADS=1`) or the processes will oversubscribe the
+machine. With numba specifically, live threads plus `fork` is the one combination that can
+hang outright.
+
+## Reproducibility
+
+`--seed` makes a run reproducible for every sampler. It has to be applied in four
+different places because each backend sources its randomness differently:
+
+| sampler | mechanism |
+|---|---|
+| dynesty | `rstate=` Generator |
+| ptemcee | `random=` RandomState threaded through burn-in and production |
+| emcee | internal RandomState, seeded from numpy's legacy global state at construction |
+| pymc | `random_seed=`, chain `i` gets `seed + i`; override with `--pymc-random-seed` |
+
+Two caveats worth knowing:
+
+- **Starting positions are the config's business, not `--seed`'s.** They come from your
+  `starting_location()`, so a config carrying its own RNG governs them regardless.
+- **dynesty results depend on `--queue-size`.** The queue size sets how many points are
+  proposed per iteration and therefore the order in which the RNG is consumed, so the same
+  seed at a different worker count gives a different — equally valid — run. Fix
+  `--queue-size` as well as `--seed` if you need runs to match across machines.
 
 ## Toy example
 
@@ -218,6 +274,26 @@ import arviz as az
 idata = az.from_netcdf("toy_emcee_idata.nc")
 print(idata.posterior["theta"].mean(("chain", "draw")))
 ```
+
+## Worked example: comparing samplers and computing evidence
+
+[`examples/alpha_ca48/`](examples/alpha_ca48/) is a full physics calibration — α elastic
+scattering on ⁴⁸Ca at 28.2 MeV, using [jitr](https://github.com/beykyle/jitr) as the
+forward model — run as a **4 sampler × 2 model matrix**.
+
+It exists to show two things the toy example cannot:
+
+- **Evidence.** `dynesty` and `ptemcee` each produce a marginal likelihood by completely
+  different routes, so running both on two competing optical-model parameterizations
+  gives a Bayes factor *and* a cross-check on the estimators. `emcee` and `pymc` produce
+  no evidence at all.
+- **Sampler behaviour on a hard posterior.** The real-potential depth is subject to the
+  classic optical-model discrete ambiguity — well-separated basins that ensemble
+  samplers can struggle to cross. How much of that structure each sampler resolves is
+  something the example measures rather than assumes.
+
+Requires the `examples` extra (Python ≥ 3.12) and runs on a laptop in an hour or so.
+See its [README](examples/alpha_ca48/README.md).
 
 ## Dynesty outputs
 
