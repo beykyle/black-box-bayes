@@ -231,6 +231,14 @@ def _ptemcee_imports():
     # estimation works under modern NumPy.
     if not hasattr(np, "trapz") and hasattr(np, "trapezoid"):
         np.trapz = np.trapezoid
+    # ptemcee's package __init__ imports its MPIPool, which imports mpi4py, which
+    # calls MPI_Init at import time. Outside an MPI launcher (serial or
+    # multiprocessing pools) that aborts the process under Open MPI ("direct
+    # launched using srun ... cannot execute"). When MPI is not already up, ask
+    # mpi4py not to initialize on import; under an MPI pool mpi4py.MPI is already
+    # imported and initialized, so this is a no-op there.
+    if "mpi4py.MPI" not in sys.modules:
+        os.environ.setdefault("MPI4PY_RC_INITIALIZE", "0")
     ptemcee = _import_optional("ptemcee", "pip install ptemcee")
 
 
