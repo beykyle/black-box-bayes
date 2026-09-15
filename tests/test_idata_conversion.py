@@ -16,6 +16,17 @@ class DummyPosterior:
     PARAMETER_NAMES = ["a", "b"]
 
 
+def _assert_parameter_names_survive(loaded):
+    """The .nc must be self-describing without the config that produced it."""
+    assert list(loaded.posterior.coords["theta_dim"].values) == ["a", "b"]
+    assert loaded.posterior.attrs["parameter_names"] == "a,b"
+    assert loaded.posterior.attrs["parameter_names_source"] == "config"
+    assert "theta_dim" in loaded.posterior.attrs["posterior_layout"]
+    assert "theta_dim" in loaded.posterior["theta"].attrs["description"]
+    # Selecting by name is the documented read path.
+    assert loaded.posterior["theta"].sel(theta_dim="a").shape == loaded.posterior["theta"].shape[:2]
+
+
 class FakeEmceeBackend:
     iteration = 5
 
@@ -46,6 +57,9 @@ def test_emcee_conversion_writes_arviz_netcdf(tmp_path):
     out = cli._write_idata(idata, tmp_path / "idata.nc")
     loaded = az.from_netcdf(out)
     assert loaded.posterior["theta"].shape == (3, 2, 2)
+    _assert_parameter_names_survive(loaded)
+    # sample_stats variables are per-draw scalars; theta_dim has no business there.
+    assert "theta_dim" not in loaded.sample_stats.coords
 
 
 @pytest.mark.skipif(importlib.util.find_spec("h5netcdf") is None and importlib.util.find_spec("netCDF4") is None, reason="NetCDF4 writer backend is not installed")
@@ -70,9 +84,11 @@ def test_dynesty_conversion_writes_arviz_netcdf(tmp_path):
     idata = cli._dynesty_to_inferencedata(results, args, runtime_seconds=0.1)
     assert hasattr(idata, "to_netcdf")
     assert idata.posterior["theta"].shape == (1, 3, 2)
+    assert list(idata.posterior.coords["theta_dim"].values) == ["a", "b"]
     out = cli._write_idata(idata, tmp_path / "dynesty.nc")
     loaded = az.from_netcdf(out)
     assert loaded.posterior["theta"].shape == (1, 3, 2)
+    _assert_parameter_names_survive(loaded)
 
 
 class FakePTChain:
@@ -113,6 +129,7 @@ def test_ptemcee_conversion_writes_arviz_netcdf(tmp_path):
     out = cli._write_idata(idata, tmp_path / "ptemcee.nc")
     loaded = az.from_netcdf(out)
     assert loaded.posterior["theta"].shape == (4, 2, 2)
+    _assert_parameter_names_survive(loaded)
 
 
 def test_ptemcee_native_results_archive_preserves_all_temperatures(tmp_path):
@@ -163,3 +180,26 @@ def test_dynesty_native_results_path_default_and_disable(tmp_path):
     assert cli._dynesty_native_results_path(args) == tmp_path / "custom.npz"
     args.no_dynesty_native_results = True
     assert cli._dynesty_native_results_path(args) is None
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("h5netcdf") is None and importlib.util.find_spec("netCDF4") is None,
+    reason="NetCDF4 writer backend is not installed",
+)
+def test_generic_names_are_recorded_as_such(tmp_path):
+    """A file labelled theta_0/theta_1 must say why it is."""
+    cli.posterior = SimpleNamespace(NDIM=2, PARAMETER_NAMES=["only_one"])
+    args = Namespace(
+        input="fake.pkl", output=str(tmp_path), seed=1,
+        dynesty_run="static", dynesty_equal_weight=False,
+    )
+    results = SimpleNamespace(
+        samples=np.zeros((2, 2)), logwt=np.log([0.5, 0.5]), logz=np.array([0.0])
+    )
+
+    idata = cli._dynesty_to_inferencedata(results, args)
+    loaded = az.from_netcdf(cli._write_idata(idata, tmp_path / "generic.nc"))
+
+    assert list(loaded.posterior.coords["theta_dim"].values) == ["theta_0", "theta_1"]
+    assert loaded.posterior.attrs["parameter_names"] == "theta_0,theta_1"
+    assert loaded.posterior.attrs["parameter_names_source"] == "generated_length_mismatch"

@@ -140,6 +140,7 @@ def test_toy_emcee_cli_writes_idata(tmp_path):
     assert idata.posterior["theta"].shape[-1] == 2
     mean = idata.posterior["theta"].mean(("chain", "draw")).values
     assert np.all(np.isfinite(mean))
+    _assert_toy_names_are_readable(idata)
 
 
 @pytest.mark.skipif(importlib.util.find_spec("ptemcee") is None, reason="ptemcee is not installed")
@@ -178,6 +179,7 @@ def test_toy_ptemcee_cli_writes_idata_and_native_archive(tmp_path):
     assert idata.posterior["theta"].shape[-1] == 2
     mean = idata.posterior["theta"].mean(("chain", "draw")).values
     assert np.all(np.isfinite(mean))
+    _assert_toy_names_are_readable(idata)
 
     data = np.load(native)
     assert data["x"].ndim == 4  # (draw, ntemps, walker, dim)
@@ -406,3 +408,43 @@ def test_seed_supplies_pymc_random_seed(tmp_path):
     # No --seed leaves it unset rather than inventing one.
     args = parse_args(["--input", "x.pkl"])
     assert args.pymc_random_seed is None
+
+
+def _assert_toy_names_are_readable(idata):
+    """The toy config names its parameters; the .nc must carry them through."""
+    assert list(idata.posterior.coords["theta_dim"].values) == ["mu0", "mu1"]
+    assert idata.posterior.attrs["parameter_names"] == "mu0,mu1"
+    assert idata.posterior.attrs["parameter_names_source"] == "config"
+    assert np.isfinite(float(idata.posterior["theta"].sel(theta_dim="mu0").mean()))
+
+
+@pytest.mark.skipif(importlib.util.find_spec("dynesty") is None, reason="dynesty is not installed")
+def test_toy_dynesty_dynamic_runs_full_range_explore_batches(tmp_path):
+    copy_toy(tmp_path)
+    subprocess.run([sys.executable, "make_config.py"], cwd=tmp_path, check=True)
+    out = tmp_path / "explore"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "black_box_bayes",
+            "--input", "toy_config.pkl",
+            "--output", str(out),
+            "--sampler", "dynesty",
+            "--dynesty-run", "dynamic",
+            "--nlive", "100", "--maxbatch", "1", "--seed", "7",
+            "--dynesty-explore-batches", "2",
+            "--dynesty-explore-nlive", "50",
+            "--dynesty-history", "none",
+            "--idata-results", str(out / "idata.nc"),
+        ],
+        cwd=tmp_path, env=subprocess_env(), text=True, capture_output=True, check=True,
+    )
+
+    assert "Adding 2 full-range exploration batch(es)" in result.stdout
+    assert "explore batch 1/2" in result.stdout
+    assert "explore batch 2/2" in result.stdout
+
+    idata = az.from_netcdf(out / "idata.nc")
+    _assert_toy_names_are_readable(idata)
+    # Provenance: two .nc files that differ only in exploration must be distinguishable.
+    assert idata.posterior.attrs["dynesty_explore_batches"] == 2
+    assert idata.posterior.attrs["dynesty_explore_nlive"] == 50

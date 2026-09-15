@@ -74,21 +74,25 @@ usage: __main__.py [-h] --input INPUT [--output OUTPUT] [--idata-results IDATA_R
                    [--sampler {emcee,ptemcee,dynesty,pymc}] [--pool {auto,serial,mpi,multiprocessing}]
                    [--nprocs NPROCS] [--no-mpi] [--require-mpi] [--chains CHAINS] [--pymc-chains PYMC_CHAINS]
                    [--steps STEPS] [--idata-discard IDATA_DISCARD] [--idata-thin IDATA_THIN]
-                   [--emcee-backend EMCEE_BACKEND] [--burnin BURNIN] [--batch-size BATCH_SIZE] [--step-size STEP_SIZE]
-                   [--rtol RTOL] [--emcee-progress | --no-emcee-progress] [--ptemcee-ntemps PTEMCEE_NTEMPS]
-                   [--ptemcee-tmax PTEMCEE_TMAX] [--ptemcee-adaptive | --no-ptemcee-adaptive]
-                   [--ptemcee-progress | --no-ptemcee-progress] [--ptemcee-native-results PTEMCEE_NATIVE_RESULTS]
-                   [--no-ptemcee-native-results] [--serial-timing-test] [--MPI-timing-test]
-                   [--dynesty-run {static,single,dynamic}] [--nlive NLIVE] [--nlive-batch NLIVE_BATCH]
-                   [--dynesty-bound {none,single,multi,balls,cubes}] [--dynesty-sample {auto,unif,rwalk,slice,rslice}]
-                   [--dynesty-walks DYNESTY_WALKS] [--dynesty-slices DYNESTY_SLICES] [--dynesty-facc DYNESTY_FACC]
+                   [--emcee-backend EMCEE_BACKEND] [--burnin BURNIN] [--batch-size BATCH_SIZE]
+                   [--step-size STEP_SIZE] [--rtol RTOL] [--emcee-progress | --no-emcee-progress]
+                   [--ptemcee-ntemps PTEMCEE_NTEMPS] [--ptemcee-tmax PTEMCEE_TMAX]
+                   [--ptemcee-adaptive | --no-ptemcee-adaptive] [--ptemcee-progress | --no-ptemcee-progress]
+                   [--ptemcee-native-results PTEMCEE_NATIVE_RESULTS] [--no-ptemcee-native-results]
+                   [--serial-timing-test] [--MPI-timing-test] [--dynesty-run {static,single,dynamic}] [--nlive NLIVE]
+                   [--nlive-batch NLIVE_BATCH] [--dynesty-bound {none,single,multi,balls,cubes}]
+                   [--dynesty-sample {auto,unif,rwalk,slice,rslice}] [--dynesty-walks DYNESTY_WALKS]
+                   [--dynesty-slices DYNESTY_SLICES] [--dynesty-facc DYNESTY_FACC]
                    [--dynesty-bootstrap DYNESTY_BOOTSTRAP] [--dynesty-enlarge DYNESTY_ENLARGE]
                    [--dynesty-update-interval DYNESTY_UPDATE_INTERVAL] [--dlogz DLOGZ] [--dlogz-init DLOGZ_INIT]
                    [--maxiter MAXITER] [--maxcall MAXCALL] [--maxbatch MAXBATCH] [--n-effective N_EFFECTIVE]
                    [--dynesty-pfrac DYNESTY_PFRAC] [--dynesty-use-stop | --no-dynesty-use-stop]
-                   [--add-live | --no-add-live] [--dynesty-progress | --no-dynesty-progress] [--queue-size QUEUE_SIZE]
-                   [--dynesty-checkpoint DYNESTY_CHECKPOINT] [--dynesty-checkpoint-every DYNESTY_CHECKPOINT_EVERY]
-                   [--dynesty-resume] [--dynesty-results DYNESTY_RESULTS]
+                   [--add-live | --no-add-live] [--dynesty-progress | --no-dynesty-progress]
+                   [--queue-size QUEUE_SIZE] [--dynesty-checkpoint DYNESTY_CHECKPOINT]
+                   [--dynesty-checkpoint-every DYNESTY_CHECKPOINT_EVERY] [--dynesty-resume]
+                   [--dynesty-explore-batches DYNESTY_EXPLORE_BATCHES]
+                   [--dynesty-explore-nlive DYNESTY_EXPLORE_NLIVE]
+                   [--dynesty-explore-maxcall DYNESTY_EXPLORE_MAXCALL] [--dynesty-results DYNESTY_RESULTS]
                    [--dynesty-native-results DYNESTY_NATIVE_RESULTS] [--no-dynesty-native-results]
                    [--dynesty-history DYNESTY_HISTORY] [--dynesty-equal-weight | --no-dynesty-equal-weight]
                    [--seed SEED] [--pymc-tune PYMC_TUNE] [--pymc-step {demetropolisz,demetropolis,metropolis}]
@@ -140,9 +144,9 @@ options:
                         Enable adaptive parallel tempering.
   --ptemcee-progress, --no-ptemcee-progress
   --ptemcee-native-results PTEMCEE_NATIVE_RESULTS
-                        ptemcee-native all-temperature results archive (.npz). Defaults to output/ptemcee_results.npz.
-                        This is separate from the standardized ArviZ InferenceData output, which holds only the cold
-                        posterior chain.
+                        ptemcee-native all-temperature results archive (.npz). Defaults to
+                        output/ptemcee_results.npz. This is separate from the standardized ArviZ InferenceData
+                        output, which holds only the cold posterior chain.
   --no-ptemcee-native-results
                         Disable the extra ptemcee-native .npz archive; ArviZ output is still written.
   --serial-timing-test
@@ -172,6 +176,18 @@ options:
   --dynesty-checkpoint DYNESTY_CHECKPOINT
   --dynesty-checkpoint-every DYNESTY_CHECKPOINT_EVERY
   --dynesty-resume
+  --dynesty-explore-batches DYNESTY_EXPLORE_BATCHES
+                        Number of full-range (mode='full') batches to append after the main dynamic run. Full-range
+                        batches re-sample the entire prior instead of the weight function's preferred likelihood
+                        slice, which is dynesty's recommended way to discover modes a run has missed. Dynamic runs
+                        only. --dynesty-use-stop does not govern these batches; they always run. Resume does not
+                        track partial progress through them: a job that dies mid-exploration restarts the whole
+                        exploration phase.
+  --dynesty-explore-nlive DYNESTY_EXPLORE_NLIVE
+                        Live points per exploration batch (default: --nlive-batch, else dynesty's default).
+  --dynesty-explore-maxcall DYNESTY_EXPLORE_MAXCALL
+                        Per-batch likelihood-call cap for exploration batches. A full-range batch redoes the whole
+                        prior-to-posterior compression, so it is not otherwise bounded.
   --dynesty-results DYNESTY_RESULTS
                         Deprecated alias for --idata-results in dynesty mode.
   --dynesty-native-results DYNESTY_NATIVE_RESULTS
@@ -275,6 +291,42 @@ idata = az.from_netcdf("toy_emcee_idata.nc")
 print(idata.posterior["theta"].mean(("chain", "draw")))
 ```
 
+## What is in the NetCDF
+
+Every sampler writes the same posterior layout: a single variable `theta` with dimensions
+`(chain, draw, theta_dim)`. The `theta_dim` coordinate is **labelled with your parameter
+names**, so the file is self-describing — you do not need the config that produced it to
+know which column is which:
+
+```python
+import arviz as az
+idata = az.from_netcdf("toy_emcee_idata.nc")
+
+print(idata.posterior["theta"].dims)                  # ('chain', 'draw', 'theta_dim')
+print(idata.posterior.coords["theta_dim"].values)     # ['mu0' 'mu1']
+
+# Select one parameter by name rather than by remembering its index:
+print(idata.posterior["theta"].sel(theta_dim="mu0").mean())
+
+# ArviZ labels its summary rows the same way: theta[mu0], theta[mu1].
+print(az.summary(idata))
+```
+
+The names come from `parameter_names` (or `PARAMETER_NAMES` / `param_names`) on your config
+object, in the same order as the columns of the `theta` vector passed to `log_posterior`.
+They are recorded three ways, all of which survive the NetCDF round trip:
+
+| where | value |
+|---|---|
+| `posterior.coords["theta_dim"]` | the ordered names — the authoritative source |
+| `posterior.attrs["parameter_names"]` | comma-joined mirror, readable with `ncdump -h` |
+| `posterior.attrs["parameter_names_source"]` | `config`, `generated`, or `generated_length_mismatch` |
+
+If your config supplies no names, or supplies a number of them that disagrees with `ndim`,
+the run falls back to generic `theta_0 … theta_n` labels and says so in
+`parameter_names_source`. A count mismatch is also warned about at load time, before
+sampling starts.
+
 ## Worked example: comparing samplers and computing evidence
 
 [`examples/alpha_ca48/`](examples/alpha_ca48/) is a full physics calibration — α elastic
@@ -318,6 +370,54 @@ Control the native archive with:
 ```
 
 The `.npz` archive stores array-like fields such as `samples`, `logl`, `logwt`, `logz`, `logzerr`, `logvol`, `ncall`, and any other portable array fields exposed by dynesty's `Results.asdict()`.
+
+### Full-range exploration batches
+
+In a dynamic run, every batch after the initial one is allocated by dynesty's *weight
+function*, which targets the likelihood range where more points most improve the posterior
+or the evidence (per `--dynesty-pfrac`). That is the right default, and it is exactly wrong
+for **mode discovery**: the weight function concentrates effort where the current run says
+it is valuable, which by construction cannot be a mode the run has not found.
+
+`--dynesty-explore-batches N` appends N batches that re-sample the *entire* prior instead
+(dynesty's `add_batch(mode='full')`, the FAQ's `logl_bounds=(-inf, inf)` recommendation).
+Each one restarts the compression from the prior and gets an independent shot at every mode.
+
+```bash
+black-box-bayes --input cfg.pkl --sampler dynesty --dynesty-run dynamic \
+  --nlive 1000 --dynesty-explore-batches 4 --dynesty-explore-nlive 500 \
+  --dynesty-explore-maxcall 2000000
+```
+
+Reach for it when the posterior is multimodal, or when you suspect modes that separate only
+at high likelihood. A full-range batch redoes the whole prior-to-posterior compression, so
+it is not otherwise bounded — `--dynesty-explore-maxcall` is cheap insurance.
+
+Three things worth knowing:
+
+- **The evidence stays valid, but it can move a lot.** dynesty merges batches into one
+  consistent dynamic-nested-sampling result, so `logz` remains a proper estimator. A jump
+  much larger than its own error bar means the batch found mass the original run missed —
+  that is the feature working, not a bug.
+- **`logzerr` will not warn you.** The quoted error is the statistical error of the
+  compression actually performed. It cannot see a mode that was never visited; in practice
+  it can read ±0.3 on a value that is hundreds of nats wrong. The way to gain confidence is
+  **batch-to-batch stability of `logz`**, printed after each batch, not a small `logzerr`.
+- **Mine the dead points, not the posterior.** If you are using nested sampling to
+  *catalogue* modes before building per-mode priors, the posterior is the wrong product — it
+  correctly weights subdominant modes out of existence. The `samples`/`logl` arrays in the
+  `.npz` are what you want; exploration batches are the cheapest way to enrich them.
+
+Defaults to `0`, so existing command lines are unaffected. Requires `--dynesty-run dynamic`
+(`NestedSampler` has no `add_batch`); combining it with a static run is an error rather than
+a silently ignored flag. `--dynesty-use-stop` governs only the weight-function batches —
+exploration batches run afterwards unconditionally. Each batch checkpoints, but resume does
+not track partial progress through the exploration phase: a job that dies during batch 3 of
+5 restarts all 5 on resume.
+
+The run records `dynesty_explore_batches`, `dynesty_explore_nlive`, and
+`dynesty_explore_maxcall` in the `.nc` attrs, so two results with different provenance stay
+distinguishable.
 
 ## ptemcee outputs
 

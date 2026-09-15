@@ -49,6 +49,44 @@ class DummyPosterior:
         (["--input", "cfg.pkl", "--dynesty-pfrac", "1.5"], "--dynesty-pfrac must be between 0 and 1"),
         (["--input", "cfg.pkl", "--ptemcee-ntemps", "0"], "--ptemcee-ntemps must be positive"),
         (["--input", "cfg.pkl", "--ptemcee-tmax", "1"], "--ptemcee-tmax must be greater than 1"),
+        (
+            ["--input", "cfg.pkl", "--dynesty-explore-batches", "-1"],
+            "--dynesty-explore-batches must be non-negative",
+        ),
+        (
+            [
+                "--input", "cfg.pkl",
+                "--sampler", "dynesty",
+                "--dynesty-run", "static",
+                "--dynesty-explore-batches", "3",
+            ],
+            "--dynesty-explore-batches requires --sampler dynesty --dynesty-run dynamic",
+        ),
+        (
+            [
+                "--input", "cfg.pkl",
+                "--sampler", "dynesty",
+                "--dynesty-run", "single",
+                "--dynesty-explore-batches", "3",
+            ],
+            "--dynesty-explore-batches requires --sampler dynesty --dynesty-run dynamic",
+        ),
+        (
+            [
+                "--input", "cfg.pkl",
+                "--sampler", "emcee",
+                "--dynesty-explore-batches", "3",
+            ],
+            "--dynesty-explore-batches requires --sampler dynesty --dynesty-run dynamic",
+        ),
+        (
+            ["--input", "cfg.pkl", "--dynesty-explore-nlive", "0"],
+            "--dynesty-explore-nlive must be positive",
+        ),
+        (
+            ["--input", "cfg.pkl", "--dynesty-explore-maxcall", "0"],
+            "--dynesty-explore-maxcall must be positive",
+        ),
     ],
 )
 def test_parse_args_rejects_invalid_inputs(argv, message, capsys):
@@ -479,3 +517,239 @@ def test_pymc_initial_theta_random_prior_is_seeded_by_chain():
 
     np.testing.assert_allclose(theta0_first, theta0_second)
     assert not np.allclose(theta0_first, theta1)
+
+
+def _explore_args(tmp_path, **overrides):
+    """Args for a dynamic dynesty run, with everything run_dynesty touches."""
+    args = Namespace(
+        input="cfg.pkl",
+        output=str(tmp_path),
+        sampler="dynesty",
+        dynesty_run="dynamic",
+        dynesty_checkpoint=None,
+        dynesty_checkpoint_every=300.0,
+        dynesty_resume=False,
+        dynesty_progress=False,
+        dynesty_equal_weight=True,
+        dynesty_explore_batches=3,
+        dynesty_explore_nlive=250,
+        dynesty_explore_maxcall=1000,
+        idata_results=None,
+        dynesty_results=None,
+        dynesty_native_results=None,
+        no_dynesty_native_results=True,
+        nlive=100,
+        nlive_batch=None,
+        maxiter=None,
+        maxcall=None,
+        dlogz=None,
+        dlogz_init=0.01,
+        maxbatch=None,
+        n_effective=None,
+        dynesty_pfrac=0.8,
+        dynesty_use_stop=True,
+        add_live=True,
+        queue_size=1,
+        seed=None,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+class FakeDynestySampler:
+    """Stand-in for dynesty's DynamicSampler, recording add_batch calls."""
+
+    ncall = 4242
+
+    def __init__(self):
+        self.batch_calls: list[dict] = []
+        self.results = {"logz": np.array([-3.0, -2.0, -1.5])}
+
+    def run_nested(self, **kwargs):
+        self.ran = kwargs
+
+    def add_batch(
+        self,
+        nlive=500,
+        dlogz=0.01,
+        mode="weight",
+        logl_bounds=None,
+        maxcall=None,
+        print_progress=True,
+        checkpoint_file=None,
+        checkpoint_every=None,
+    ):
+        self.batch_calls.append(
+            dict(
+                nlive=nlive,
+                mode=mode,
+                logl_bounds=logl_bounds,
+                maxcall=maxcall,
+                print_progress=print_progress,
+                checkpoint_file=checkpoint_file,
+                checkpoint_every=checkpoint_every,
+            )
+        )
+
+
+def _patch_dynesty_run(monkeypatch, sampler):
+    cli.posterior = DummyPosterior
+    monkeypatch.setattr(cli, "_dynesty_imports", lambda: None)
+    monkeypatch.setattr(cli, "_make_dynesty_sampler", lambda *a, **k: sampler)
+    monkeypatch.setattr(cli, "_dynesty_to_inferencedata", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "_write_idata", lambda idata, path: path)
+    monkeypatch.setattr(cli, "_write_dynesty_native_results", lambda results, path: None)
+
+
+def test_run_dynesty_appends_full_range_explore_batches(monkeypatch, tmp_path):
+    sampler = FakeDynestySampler()
+    _patch_dynesty_run(monkeypatch, sampler)
+
+    cli.run_dynesty(_explore_args(tmp_path), pool=None, size=1)
+
+    assert len(sampler.batch_calls) == 3
+    for call in sampler.batch_calls:
+        assert call["mode"] == "full"
+        # dynesty raises RuntimeError if logl_bounds is combined with any mode
+        # other than 'manual', so it must never be passed.
+        assert call["logl_bounds"] is None
+        assert call["nlive"] == 250
+        assert call["maxcall"] == 1000
+        assert call["checkpoint_file"] == str(tmp_path / "dynesty_checkpoint.pkl")
+        assert call["checkpoint_every"] == 300.0
+
+
+def test_run_dynesty_explore_nlive_falls_back_to_nlive_batch(monkeypatch, tmp_path):
+    sampler = FakeDynestySampler()
+    _patch_dynesty_run(monkeypatch, sampler)
+    args = _explore_args(
+        tmp_path, dynesty_explore_batches=1, dynesty_explore_nlive=None, nlive_batch=777
+    )
+
+    cli.run_dynesty(args, pool=None, size=1)
+
+    assert sampler.batch_calls[0]["nlive"] == 777
+
+
+def test_run_dynesty_explore_nlive_defaults_to_dynesty_default(monkeypatch, tmp_path):
+    sampler = FakeDynestySampler()
+    _patch_dynesty_run(monkeypatch, sampler)
+    args = _explore_args(
+        tmp_path, dynesty_explore_batches=1, dynesty_explore_nlive=None, nlive_batch=None
+    )
+
+    cli.run_dynesty(args, pool=None, size=1)
+
+    # Omitted entirely rather than passed as None, so dynesty's own default applies.
+    assert sampler.batch_calls[0]["nlive"] == 500
+
+
+def test_run_dynesty_skips_explore_batches_by_default(monkeypatch, tmp_path):
+    sampler = FakeDynestySampler()
+    _patch_dynesty_run(monkeypatch, sampler)
+
+    cli.run_dynesty(_explore_args(tmp_path, dynesty_explore_batches=0), pool=None, size=1)
+
+    assert sampler.batch_calls == []
+
+
+def test_run_dynesty_explore_batches_tolerate_missing_add_batch_kwargs(monkeypatch, tmp_path):
+    """A dynesty version whose add_batch lacks checkpoint_every must still work."""
+
+    class NarrowSampler(FakeDynestySampler):
+        def add_batch(self, nlive=500, mode="weight", maxcall=None, print_progress=True):
+            self.batch_calls.append(
+                dict(nlive=nlive, mode=mode, maxcall=maxcall, print_progress=print_progress)
+            )
+
+    sampler = NarrowSampler()
+    _patch_dynesty_run(monkeypatch, sampler)
+
+    cli.run_dynesty(_explore_args(tmp_path, dynesty_explore_batches=2), pool=None, size=1)
+
+    assert len(sampler.batch_calls) == 2
+    assert all("checkpoint_every" not in call for call in sampler.batch_calls)
+
+
+def test_run_dynesty_ignores_explore_batches_for_static_runs(monkeypatch, tmp_path):
+    """parse_args rejects this combination, but run_dynesty must not rely on that."""
+    sampler = FakeDynestySampler()
+    _patch_dynesty_run(monkeypatch, sampler)
+
+    cli.run_dynesty(_explore_args(tmp_path, dynesty_run="static"), pool=None, size=1)
+
+    assert sampler.batch_calls == []
+
+
+def test_dynesty_conversion_records_explore_batch_provenance():
+    cli.posterior = DummyPosterior
+    args = Namespace(
+        input="fake.pkl",
+        output=".",
+        seed=123,
+        dynesty_run="dynamic",
+        dynesty_equal_weight=False,
+        dynesty_explore_batches=4,
+        dynesty_explore_nlive=None,
+        dynesty_explore_maxcall=5000,
+        nlive_batch=321,
+    )
+    results = SimpleNamespace(
+        samples=np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]),
+        logwt=np.log(np.array([0.2, 0.3, 0.5])),
+        logz=np.array([0.0]),
+    )
+
+    attrs = cli._dynesty_to_inferencedata(results, args, runtime_seconds=0.1).posterior.attrs
+
+    assert attrs["dynesty_explore_batches"] == 4
+    assert attrs["dynesty_explore_nlive"] == 321
+    assert attrs["dynesty_explore_maxcall"] == 5000
+
+
+def test_dynesty_conversion_explore_attrs_default_without_the_flags():
+    """Older Namespaces that predate the flags must still convert."""
+    cli.posterior = DummyPosterior
+    args = Namespace(
+        input="fake.pkl", output=".", seed=1, dynesty_run="static", dynesty_equal_weight=False
+    )
+    results = SimpleNamespace(
+        samples=np.zeros((2, 2)), logwt=np.log([0.5, 0.5]), logz=np.array([0.0])
+    )
+
+    attrs = cli._dynesty_to_inferencedata(results, args).posterior.attrs
+
+    assert attrs["dynesty_explore_batches"] == 0
+    assert attrs["dynesty_explore_nlive"] == "None"
+
+
+def test_parameter_names_reports_config_source():
+    cli.posterior = DummyPosterior
+    assert cli._parameter_names() == (["a", "b"], "config")
+
+
+def test_parameter_names_generated_when_absent():
+    cli.posterior = SimpleNamespace(NDIM=3)
+    assert cli._parameter_names() == (["theta_0", "theta_1", "theta_2"], "generated")
+
+
+def test_parameter_names_flags_length_mismatch(capsys):
+    cli.posterior = SimpleNamespace(NDIM=2, PARAMETER_NAMES=["only_one"])
+
+    names, source = cli._parameter_names()
+
+    assert names == ["theta_0", "theta_1"]
+    assert source == "generated_length_mismatch"
+    assert "does not match posterior.NDIM" in capsys.readouterr().err
+
+
+def test_posterior_from_config_warns_on_name_count_mismatch(tmp_path, capsys):
+    config_path = tmp_path / "cfg.pkl"
+    with config_path.open("wb") as handle:
+        pickle.dump(SimpleNamespace(ndim=2, parameter_names=["only_one"]), handle)
+
+    cli._posterior_from_config(config_path)
+
+    # Warning must land before sampling starts, not after the run.
+    assert "1 parameter names but NDIM is 2" in capsys.readouterr().err

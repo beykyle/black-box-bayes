@@ -195,6 +195,15 @@ def _posterior_from_config(config_path: str | os.PathLike[str]):
     }
     if parameter_names is not None:
         attrs["PARAMETER_NAMES"] = parameter_names
+        # Warn at load time rather than after sampling: the conversion-time fallback
+        # to generic names would otherwise only surface once the run is over.
+        names = parameter_names() if callable(parameter_names) else parameter_names
+        if ndim is not None and len(list(names)) != ndim:
+            print(
+                f"Warning: config supplies {len(list(names))} parameter names but NDIM is {ndim}; "
+                "results will be labelled with generic theta_<i> names.",
+                file=sys.stderr,
+            )
 
     if hasattr(_CONFIG, "log_likelihood"):
         attrs["log_likelihood"] = _config_log_likelihood
@@ -392,7 +401,13 @@ def _prior_mean_or_representative() -> np.ndarray:
     return _check_starting_location(1)[0]
 
 
-def _theta_coords_and_dims():
+def _parameter_names():
+    """Resolve ordered parameter names, plus where they came from.
+
+    The second element is recorded in the output attrs so a file labelled with
+    generic names says why it is: silently falling back after a multi-hour run
+    is otherwise invisible.
+    """
     names = None
     for attr in ("PARAMETER_NAMES", "parameter_names", "param_names"):
         if hasattr(posterior, attr):
@@ -400,16 +415,23 @@ def _theta_coords_and_dims():
             names = value() if callable(value) else value
             break
 
+    generic = [f"theta_{i}" for i in range(posterior.NDIM)]
     if names is None:
-        names = [f"theta_{i}" for i in range(posterior.NDIM)]
-    names = list(names)
+        return generic, "generated"
+
+    names = [str(name) for name in names]
     if len(names) != posterior.NDIM:
         print(
             "Parameter-name count does not match posterior.NDIM; using generic names.",
             file=sys.stderr,
         )
-        names = [f"theta_{i}" for i in range(posterior.NDIM)]
+        return generic, "generated_length_mismatch"
 
+    return names, "config"
+
+
+def _theta_coords_and_dims():
+    names, _ = _parameter_names()
     return {"theta_dim": names}, {"theta": ["theta_dim"]}
 
 
@@ -541,6 +563,27 @@ def _write_idata(idata, path: Path) -> Path:
 
 
 
+# Descriptions written into the NetCDF so the sample layout is self-explanatory to
+# anyone opening the file cold (including via `ncdump -h`).
+_THETA_VAR_DESCRIPTION = (
+    "Model parameter vector. The trailing theta_dim axis is labelled with the "
+    "parameter names; select one with theta.sel(theta_dim='<name>'). See the "
+    "parameter_names attribute for the ordered list."
+)
+_THETA_DIM_DESCRIPTION = (
+    "Model parameter name, in the same order as the columns of the theta vector "
+    "passed to the config's log_posterior."
+)
+_THETA_VAR_ATTRS = {"theta": {"description": _THETA_VAR_DESCRIPTION}}
+
+
+def _annotate_theta_dim(dataset):
+    """Describe the theta_dim coordinate in place, if the dataset has one."""
+    if dataset is not None and "theta_dim" in dataset.coords:
+        dataset.coords["theta_dim"].attrs.setdefault("description", _THETA_DIM_DESCRIPTION)
+    return dataset
+
+
 def _dataset_from_arrays(data: dict[str, np.ndarray] | None, coords: dict[str, Any] | None, dims: dict[str, list[str]] | None):
     """Build an xarray.Dataset with ArviZ-style chain/draw dimensions.
 
@@ -583,6 +626,7 @@ def _inferencedata_from_arrays(
     coords: dict[str, Any] | None = None,
     dims: dict[str, list[str]] | None = None,
     attrs: dict[str, Any] | None = None,
+    var_attrs: dict[str, dict[str, Any]] | None = None,
 ):
     """Create an ArviZ result across the 0.x -> 1.x API boundary.
 
@@ -595,7 +639,14 @@ def _inferencedata_from_arrays(
     dims = dims or None
 
     posterior_ds = _dataset_from_arrays(posterior_data, coords, dims)
-    sample_stats_ds = _dataset_from_arrays(sample_stats_data, coords, {})
+    # sample_stats variables are per-draw scalars; passing the parameter-name coords
+    # here would attach an unused theta_dim coordinate to that group. chain/draw are
+    # filled in by _dataset_from_arrays regardless.
+    sample_stats_ds = _dataset_from_arrays(sample_stats_data, None, {})
+    _annotate_theta_dim(posterior_ds)
+    for name, var_attr in (var_attrs or {}).items():
+        if posterior_ds is not None and name in posterior_ds:
+            posterior_ds[name].attrs.update(var_attr)
     groups = {"posterior": posterior_ds}
     if sample_stats_ds is not None:
         groups["sample_stats"] = sample_stats_ds
@@ -650,12 +701,18 @@ def _netcdf_attr_value(value):
 
 
 def _common_attrs(args, sampler: str, runtime_seconds=None, extra=None):
+    names, names_source = _parameter_names()
     attrs = {
         "sampler": sampler,
         "input": str(args.input),
         "created_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "posterior_ndim": int(posterior.NDIM),
         "driver": Path(__file__).name,
+        # Human-readable mirror of the theta_dim coordinate, which stays the
+        # authoritative ordered source. Both survive the NetCDF round trip.
+        "parameter_names": ",".join(names),
+        "parameter_names_source": names_source,
+        "posterior_layout": "theta(chain, draw, theta_dim); theta_dim is labelled with parameter_names",
     }
     if runtime_seconds is not None:
         attrs["runtime_seconds"] = float(runtime_seconds)
@@ -727,6 +784,7 @@ def _emcee_to_inferencedata(backend, args, runtime_seconds=None) -> az.Inference
         coords=coords,
         dims=dims,
         attrs=attrs,
+        var_attrs=_THETA_VAR_ATTRS,
     )
 
 
@@ -783,6 +841,7 @@ def _ptemcee_to_inferencedata(chain, args, runtime_seconds=None) -> az.Inference
         coords=coords,
         dims=dims,
         attrs=attrs,
+        var_attrs=_THETA_VAR_ATTRS,
     )
 
 
@@ -832,6 +891,11 @@ def _normalized_dynesty_weights(results) -> np.ndarray:
     return weights / total
 
 
+def _dynesty_explore_nlive(args):
+    """Live points per exploration batch; None means dynesty's own default."""
+    return getattr(args, "dynesty_explore_nlive", None) or getattr(args, "nlive_batch", None)
+
+
 def _dynesty_to_inferencedata(results, args, runtime_seconds=None) -> az.InferenceData:
     samples = np.asarray(results.samples, dtype=float)
     if samples.ndim != 2:
@@ -866,6 +930,11 @@ def _dynesty_to_inferencedata(results, args, runtime_seconds=None) -> az.Inferen
         "dynesty_equal_weight_resample": bool(args.dynesty_equal_weight),
         "dynesty_raw_sample_count": int(samples.shape[0]),
         "dynesty_posterior_draw_count": int(theta.shape[1]),
+        # Exploration batches change what the evidence converges to, so two files with
+        # different provenance must not be indistinguishable.
+        "dynesty_explore_batches": int(getattr(args, "dynesty_explore_batches", 0) or 0),
+        "dynesty_explore_nlive": _dynesty_explore_nlive(args),
+        "dynesty_explore_maxcall": getattr(args, "dynesty_explore_maxcall", None),
     }
     for name in ("logz", "logzerr", "information", "niter", "ncall"):
         if hasattr(results, name):
@@ -882,6 +951,7 @@ def _dynesty_to_inferencedata(results, args, runtime_seconds=None) -> az.Inferen
         coords=coords,
         dims=dims,
         attrs=_common_attrs(args, "dynesty", runtime_seconds=runtime_seconds, extra=extra),
+        var_attrs=_THETA_VAR_ATTRS,
     )
 
 
@@ -1071,6 +1141,35 @@ def parse_args(argv=None):
     parser.add_argument("--dynesty-checkpoint", type=str, default=None)
     parser.add_argument("--dynesty-checkpoint-every", type=float, default=300.0)
     parser.add_argument("--dynesty-resume", action="store_true")
+    parser.add_argument(
+        "--dynesty-explore-batches",
+        type=int,
+        default=0,
+        help=(
+            "Number of full-range (mode='full') batches to append after the main "
+            "dynamic run. Full-range batches re-sample the entire prior instead of "
+            "the weight function's preferred likelihood slice, which is dynesty's "
+            "recommended way to discover modes a run has missed. Dynamic runs only. "
+            "--dynesty-use-stop does not govern these batches; they always run. "
+            "Resume does not track partial progress through them: a job that dies "
+            "mid-exploration restarts the whole exploration phase."
+        ),
+    )
+    parser.add_argument(
+        "--dynesty-explore-nlive",
+        type=int,
+        default=None,
+        help="Live points per exploration batch (default: --nlive-batch, else dynesty's default).",
+    )
+    parser.add_argument(
+        "--dynesty-explore-maxcall",
+        type=int,
+        default=None,
+        help=(
+            "Per-batch likelihood-call cap for exploration batches. A full-range batch "
+            "redoes the whole prior-to-posterior compression, so it is not otherwise bounded."
+        ),
+    )
     parser.add_argument("--dynesty-results", type=str, default=None, help="Deprecated alias for --idata-results in dynesty mode.")
     parser.add_argument(
         "--dynesty-native-results",
@@ -1117,6 +1216,8 @@ def parse_args(argv=None):
         ("--nlive-batch", args.nlive_batch),
         ("--queue-size", args.queue_size),
         ("--nprocs", args.nprocs),
+        ("--dynesty-explore-nlive", args.dynesty_explore_nlive),
+        ("--dynesty-explore-maxcall", args.dynesty_explore_maxcall),
     ]
     for name, value in positive:
         if value is not None and value <= 0:
@@ -1127,8 +1228,14 @@ def parse_args(argv=None):
         parser.error("--idata-discard must be non-negative.")
     if args.pymc_tune < 0:
         parser.error("--pymc-tune must be non-negative.")
+    if args.dynesty_explore_batches < 0:
+        parser.error("--dynesty-explore-batches must be non-negative.")
     if not 0.0 <= args.dynesty_pfrac <= 1.0:
         parser.error("--dynesty-pfrac must be between 0 and 1.")
+    if args.dynesty_explore_batches and (args.sampler != "dynesty" or args.dynesty_run != "dynamic"):
+        # Static samplers have no add_batch, and silently dropping a flag the user set
+        # is the exact failure mode this feature exists to fix.
+        parser.error("--dynesty-explore-batches requires --sampler dynesty --dynesty-run dynamic.")
     if args.ptemcee_tmax is not None and args.ptemcee_tmax <= 1.0:
         parser.error("--ptemcee-tmax must be greater than 1.")
     if args.no_mpi and args.require_mpi:
@@ -1472,6 +1579,43 @@ def run_dynesty(args, pool, size=1):
     run_kwargs = _filter_kwargs_for_callable(sampler.run_nested, run_kwargs)
     sampler.run_nested(**run_kwargs)
 
+    n_explore = getattr(args, "dynesty_explore_batches", 0) or 0
+    if n_explore and dynesty_run == "dynamic":
+        batch_nlive = _dynesty_explore_nlive(args)
+        print(
+            f"Adding {n_explore} full-range exploration batch(es), "
+            f"nlive={batch_nlive or 'dynesty default'} each. These re-sample the whole "
+            "prior rather than the weight function's preferred slice, which is what "
+            "gives previously-missed modes a chance to appear."
+        )
+        for i in range(n_explore):
+            batch_kwargs = dict(
+                # mode='full' leaves logl_bounds unset, which downstream means the whole
+                # range. Do NOT pass logl_bounds: dynesty raises RuntimeError unless
+                # mode='manual'.
+                mode="full",
+                nlive=batch_nlive,
+                maxcall=args.dynesty_explore_maxcall,
+                print_progress=args.dynesty_progress,
+                checkpoint_file=str(checkpoint_path),
+                # An explicit checkpoint_every tells add_batch it is being driven
+                # externally, so it manages its own timer instead of run_nested's.
+                checkpoint_every=args.dynesty_checkpoint_every,
+            )
+            # add_batch's defaults are meaningful (nlive=500); passing None explicitly
+            # is not the same as omitting the kwarg.
+            batch_kwargs = {k: v for k, v in batch_kwargs.items() if v is not None}
+            batch_kwargs = _filter_kwargs_for_callable(sampler.add_batch, batch_kwargs)
+            sampler.add_batch(**batch_kwargs)
+            # A logz jump much larger than logzerr means this batch found mass the
+            # original run missed. That is the signal worth watching.
+            try:
+                logz = f"{float(np.asarray(sampler.results['logz']).reshape(-1)[-1]):.3f}"
+            except Exception:
+                logz = "unavailable"
+            ncall = getattr(sampler, "ncall", "unavailable")
+            print(f"  explore batch {i + 1}/{n_explore}: ncall={ncall} logz={logz}")
+
     dt = time() - t0
     idata = _dynesty_to_inferencedata(sampler.results, args, runtime_seconds=dt)
     _write_idata(idata, idata_path)
@@ -1506,6 +1650,13 @@ def run_pymc(args, pool, size=1):
 
     trace = _concat_traces_along_chain(traces)
     _add_attrs_to_idata(trace, _common_attrs(args, "pymc", runtime_seconds=dt))
+    # PyMC builds its own InferenceData, so the theta annotations are applied here
+    # rather than in _inferencedata_from_arrays.
+    try:
+        trace.posterior["theta"].attrs.update(_THETA_VAR_ATTRS["theta"])
+        _annotate_theta_dim(trace.posterior)
+    except Exception:
+        pass
     _write_idata(trace, idata_path)
     print(f"PyMC sampling took {_dt.timedelta(seconds=dt)}")
     print(f"Saved ArviZ InferenceData to {idata_path}")
