@@ -18,6 +18,7 @@ All samplers write an ArviZ InferenceData NetCDF file.
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime as _dt
 import importlib
 import inspect
@@ -255,11 +256,23 @@ def _pymc_imports():
     Op = importlib.import_module("pytensor.graph.op").Op
 
 
+def _mpi_finalize():
+    if MPI is not None and MPI.Is_initialized() and not MPI.Is_finalized():
+        MPI.Finalize()
+
+
 def _mpi_imports(required: bool = False):
     """Import MPI helpers if available; return True when MPI is usable."""
     global MPI, MPIPool
     try:
         MPI = importlib.import_module("mpi4py.MPI")
+        if not MPI.Is_initialized() and not MPI.Is_finalized():
+            # mpi4py may already have been imported without initializing MPI
+            # (MPI4PY_RC_INITIALIZE=0, set by _ptemcee_imports because the
+            # ptemcee package imports mpi4py at import time). Initialize here,
+            # where MPI is actually wanted, and finalize at exit.
+            MPI.Init_thread()
+            atexit.register(_mpi_finalize)
         MPIPool = importlib.import_module("schwimmbad").MPIPool
         return True
     except Exception as exc:
