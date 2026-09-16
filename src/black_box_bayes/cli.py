@@ -18,6 +18,7 @@ All samplers write an ArviZ InferenceData NetCDF file.
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime as _dt
 import importlib
 import inspect
@@ -231,6 +232,14 @@ def _ptemcee_imports():
     # estimation works under modern NumPy.
     if not hasattr(np, "trapz") and hasattr(np, "trapezoid"):
         np.trapz = np.trapezoid
+    # ptemcee's package __init__ imports its MPIPool, which imports mpi4py, which
+    # calls MPI_Init at import time. Outside an MPI launcher (serial or
+    # multiprocessing pools) that aborts the process under Open MPI ("direct
+    # launched using srun ... cannot execute"). When MPI is not already up, ask
+    # mpi4py not to initialize on import; under an MPI pool mpi4py.MPI is already
+    # imported and initialized, so this is a no-op there.
+    if "mpi4py.MPI" not in sys.modules:
+        os.environ.setdefault("MPI4PY_RC_INITIALIZE", "0")
     ptemcee = _import_optional("ptemcee", "pip install ptemcee")
 
 
@@ -247,11 +256,23 @@ def _pymc_imports():
     Op = importlib.import_module("pytensor.graph.op").Op
 
 
+def _mpi_finalize():
+    if MPI is not None and MPI.Is_initialized() and not MPI.Is_finalized():
+        MPI.Finalize()
+
+
 def _mpi_imports(required: bool = False):
     """Import MPI helpers if available; return True when MPI is usable."""
     global MPI, MPIPool
     try:
         MPI = importlib.import_module("mpi4py.MPI")
+        if not MPI.Is_initialized() and not MPI.Is_finalized():
+            # mpi4py may already have been imported without initializing MPI
+            # (MPI4PY_RC_INITIALIZE=0, set by _ptemcee_imports because the
+            # ptemcee package imports mpi4py at import time). Initialize here,
+            # where MPI is actually wanted, and finalize at exit.
+            MPI.Init_thread()
+            atexit.register(_mpi_finalize)
         MPIPool = importlib.import_module("schwimmbad").MPIPool
         return True
     except Exception as exc:
