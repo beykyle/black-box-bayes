@@ -1532,7 +1532,15 @@ def _restore_dynesty_sampler(args, checkpoint_path: Path, pool):
     if dynesty_run == "dynamic":
         return dynesty.DynamicNestedSampler.restore(str(checkpoint_path), pool=pool)
     if dynesty_run == "static":
-        return dynesty.NestedSampler.restore(str(checkpoint_path), pool=pool)
+        sampler = dynesty.NestedSampler.restore(str(checkpoint_path), pool=pool)
+        if getattr(sampler, "added_live", False):
+            # A static run that stopped on maxcall/maxiter has already had its live
+            # points appended and dynesty considers it finished ("resuming a finished
+            # static run ... will not do anything"). Remove them so run_nested(resume=True)
+            # continues the compression; they are re-added when it finishes.
+            sampler._remove_live_points()
+            print("Removed previously added live points; continuing the static run.")
+        return sampler
     raise ValueError(f"Unknown dynesty run type {args.dynesty_run}.")
 
 
