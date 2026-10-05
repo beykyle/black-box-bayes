@@ -14,6 +14,8 @@ Ahh, you have a big output space and your model is not differentiable? That suck
 
 In all cases, the output is an ArviZ `InferenceData` NetCDF file, so post processing workflows are the same regardless of sampler choice. In all cases, massive parallelism is available via MPI (requiring `schwimmbad`), so high performance computing environments, many chains, and long calibrations are no problem.
 
+If you publish results from 🅱️🅱️🅱️, please cite the sampler(s) you used; see [Citing](#citing).
+
 ## What is 🅱️🅱️🅱️?
 
 A small installable package that exposes a single CLI, `black-box-bayes`, for
@@ -576,4 +578,179 @@ use an environment that provides `mpiexec`:
 ```bash
 pip install -e .[test,mpi]
 pytest tests/test_toy_cli.py -k mpi
+```
+
+## Citing
+
+🅱️🅱️🅱️ is a thin wrapper: all the actual sampling is done by the packages below.
+If you use 🅱️🅱️🅱️ in published work, **please cite the sampler(s) you actually ran**,
+along with the papers describing the algorithms they implement. The entries below
+are the ones each project asks for.
+
+### emcee (`--sampler emcee`)
+
+```bibtex
+@article{ForemanMackey2013,
+  author  = {Foreman-Mackey, Daniel and Hogg, David W. and Lang, Dustin and Goodman, Jonathan},
+  title   = {emcee: The MCMC Hammer},
+  journal = {Publications of the Astronomical Society of the Pacific},
+  volume  = {125},
+  number  = {925},
+  pages   = {306--312},
+  year    = {2013},
+  doi     = {10.1086/670067}
+}
+
+@article{Goodman2010,
+  author  = {Goodman, Jonathan and Weare, Jonathan},
+  title   = {Ensemble samplers with affine invariance},
+  journal = {Communications in Applied Mathematics and Computational Science},
+  volume  = {5},
+  number  = {1},
+  pages   = {65--80},
+  year    = {2010},
+  doi     = {10.2140/camcos.2010.5.65}
+}
+```
+
+### ptemcee (`--sampler ptemcee`)
+
+The `ptemcee` README asks for both the adaptive parallel-tempering paper and the
+`emcee` paper (`ForemanMackey2013` above), since `ptemcee` is built on `emcee`.
+
+```bibtex
+@article{Vousden2016,
+  author  = {Vousden, W. D. and Farr, W. M. and Mandel, I.},
+  title   = {Dynamic temperature selection for parallel tempering in Markov chain Monte Carlo simulations},
+  journal = {Monthly Notices of the Royal Astronomical Society},
+  volume  = {455},
+  number  = {2},
+  pages   = {1919--1937},
+  year    = {2016},
+  doi     = {10.1093/mnras/stv2422}
+}
+```
+
+### dynesty (`--sampler dynesty`)
+
+Cite the `dynesty` paper, the Zenodo record **for the version you used** (find it
+from the [concept DOI](https://doi.org/10.5281/zenodo.3348367)), and Skilling's
+nested sampling papers:
+
+```bibtex
+@article{Speagle2020,
+  author  = {Speagle, Joshua S.},
+  title   = {dynesty: a dynamic nested sampling package for estimating Bayesian posteriors and evidences},
+  journal = {Monthly Notices of the Royal Astronomical Society},
+  volume  = {493},
+  number  = {3},
+  pages   = {3132--3158},
+  year    = {2020},
+  doi     = {10.1093/mnras/staa278}
+}
+
+@software{Koposov_dynesty,
+  author    = {Koposov, Sergey and Speagle, Josh and Barbary, Kyle and others},
+  title     = {joshspeagle/dynesty},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.3348367},
+  note      = {Replace with the version-specific DOI for the release you used}
+}
+
+@inproceedings{Skilling2004,
+  author    = {Skilling, John},
+  title     = {Nested Sampling},
+  booktitle = {AIP Conference Proceedings},
+  volume    = {735},
+  pages     = {395--405},
+  year      = {2004},
+  doi       = {10.1063/1.1835238}
+}
+
+@article{Skilling2006,
+  author  = {Skilling, John},
+  title   = {Nested sampling for general Bayesian computation},
+  journal = {Bayesian Analysis},
+  volume  = {1},
+  number  = {4},
+  pages   = {833--859},
+  year    = {2006},
+  doi     = {10.1214/06-BA127}
+}
+```
+
+Depending on the options you chose, `dynesty` also asks you to cite the papers
+behind them, e.g. Higson et al. (2019,
+[doi:10.1007/s11222-018-9844-0](https://doi.org/10.1007/s11222-018-9844-0)) for
+`--dynesty-run dynamic`, Feroz, Hobson & Bridges (2009,
+[doi:10.1111/j.1365-2966.2009.14548.x](https://doi.org/10.1111/j.1365-2966.2009.14548.x))
+for `--dynesty-bound multi`, and the slice-sampling papers for `slice`/`rslice`.
+See the [dynesty citation guide](https://dynesty.readthedocs.io/en/latest/references.html)
+for the full list. You can also print `sampler.citations` on the native `dynesty`
+sampler to get the references for your exact configuration.
+
+### pocoMC (`--sampler pocomc`)
+
+```bibtex
+@article{Karamanis2022MNRAS,
+  author  = {Karamanis, Minas and Beutler, Florian and Peacock, John A. and Nabergoj, David and Seljak, Uro{\v{s}}},
+  title   = {Accelerating astronomical and cosmological inference with preconditioned Monte Carlo},
+  journal = {Monthly Notices of the Royal Astronomical Society},
+  volume  = {516},
+  number  = {2},
+  pages   = {1644--1653},
+  year    = {2022},
+  doi     = {10.1093/mnras/stac2272}
+}
+
+@article{Karamanis2022JOSS,
+  author  = {Karamanis, Minas and Nabergoj, David and Beutler, Florian and Peacock, John A. and Seljak, Uro{\v{s}}},
+  title   = {pocoMC: A Python package for accelerated Bayesian inference in astronomy and cosmology},
+  journal = {Journal of Open Source Software},
+  volume  = {7},
+  number  = {79},
+  pages   = {4634},
+  year    = {2022},
+  doi     = {10.21105/joss.04634}
+}
+```
+
+### PyMC (`--sampler pymc`)
+
+Cite PyMC, plus the paper for the step method you selected with `--pymc-step`:
+ter Braak & Vrugt (2008) for `demetropolisz` (the default) or ter Braak (2006) for
+`demetropolis`.
+
+```bibtex
+@article{AbrilPla2023,
+  author  = {Abril-Pla, Oriol and Andreani, Virgile and Carroll, Colin and Dong, Larry and Fonnesbeck, Christopher J. and Kochurov, Maxim and Kumar, Ravin and Lao, Junpeng and Luhmann, Christian C. and Martin, Osvaldo A. and Osthege, Michael and Vieira, Ricardo and Wiecki, Thomas and Zinkov, Robert},
+  title   = {PyMC: a modern, and comprehensive probabilistic programming framework in Python},
+  journal = {PeerJ Computer Science},
+  volume  = {9},
+  pages   = {e1516},
+  year    = {2023},
+  doi     = {10.7717/peerj-cs.1516}
+}
+
+@article{terBraak2008,
+  author  = {ter Braak, Cajo J. F. and Vrugt, Jasper A.},
+  title   = {Differential Evolution Markov Chain with snooker updater and fewer chains},
+  journal = {Statistics and Computing},
+  volume  = {18},
+  number  = {4},
+  pages   = {435--446},
+  year    = {2008},
+  doi     = {10.1007/s11222-008-9104-9}
+}
+
+@article{terBraak2006,
+  author  = {ter Braak, Cajo J. F.},
+  title   = {A Markov Chain Monte Carlo version of the genetic algorithm Differential Evolution: easy Bayesian computing for real parameter spaces},
+  journal = {Statistics and Computing},
+  volume  = {16},
+  number  = {3},
+  pages   = {239--249},
+  year    = {2006},
+  doi     = {10.1007/s11222-006-8769-1}
+}
 ```
