@@ -6,11 +6,12 @@ This driver expects ``--input`` to point at a pickled config-like object exposin
     ndim
     starting_location(nwalkers)
     log_posterior(theta)
-    log_likelihood(theta)       # required for dynesty and ptemcee
-    log_prior(theta)            # required for ptemcee
-    prior_transform(u)          # required for dynesty
+    log_likelihood(theta)       # required for dynesty, ptemcee, and pocomc
+    log_prior(theta)            # required for ptemcee and pocomc
+    prior_transform(u)          # required for dynesty and pocomc
     log_posterior_batch(thetas) # optional; used for timing only
     parameter_names             # optional
+    prior_bounds                # optional; (ndim, 2) prior support for pocomc
 
 All samplers write an ArviZ InferenceData NetCDF file.
 """
@@ -47,6 +48,7 @@ _CONFIG = None
 emcee = None
 ptemcee = None
 dynesty = None
+pocomc = None
 cloudpickle = None
 pymc = None
 pt = None
@@ -213,7 +215,7 @@ def _posterior_from_config(config_path: str | os.PathLike[str]):
     if hasattr(_CONFIG, "prior_transform"):
         attrs["prior_transform"] = _config_prior_transform
 
-    for name in ("parameter_names", "param_names", "prior_mean", "PRIOR_MEAN"):
+    for name in ("parameter_names", "param_names", "prior_mean", "PRIOR_MEAN", "prior_bounds"):
         if hasattr(_CONFIG, name):
             attrs[name] = getattr(_CONFIG, name)
 
@@ -246,6 +248,11 @@ def _ptemcee_imports():
 def _dynesty_imports():
     global dynesty
     dynesty = _import_optional("dynesty", "pip install dynesty")
+
+
+def _pocomc_imports():
+    global pocomc
+    pocomc = _import_optional("pocomc", "pip install pocomc")
 
 
 def _pymc_imports():
@@ -399,12 +406,12 @@ def _check_for_log_likelihood():
 
 def _check_for_log_prior():
     if not hasattr(posterior, "log_prior"):
-        raise AttributeError("The input object must expose log_prior(theta) for ptemcee.")
+        raise AttributeError("The input object must expose log_prior(theta) for ptemcee and pocomc.")
 
 
 def _check_for_prior_transform():
     if not hasattr(posterior, "prior_transform"):
-        raise AttributeError("The input object must expose prior_transform(u) for dynesty.")
+        raise AttributeError("The input object must expose prior_transform(u) for dynesty and pocomc.")
 
 
 def _prior_mean_or_representative() -> np.ndarray:
@@ -497,6 +504,27 @@ def _ptemcee_native_results_path(args) -> Path | None:
     return Path(path)
 
 
+def _pocomc_native_results_path(args) -> Path | None:
+    """Return the pocomc-native archive path, or None when disabled.
+
+    Separate from ``--idata-results``: it keeps pocomc's full particle history
+    (every tempering iteration, with betas, log-weights, and the evidence trace).
+    """
+    if getattr(args, "no_pocomc_native_results", False):
+        return None
+    path = getattr(args, "pocomc_native_results", None)
+    if path is None:
+        path = Path(args.output) / "pocomc_results.npz"
+    return Path(path)
+
+
+def _pocomc_checkpoint_path(args) -> Path:
+    path = getattr(args, "pocomc_checkpoint", None)
+    if path is None:
+        path = Path(args.output) / "pocomc_checkpoint.state"
+    return Path(path)
+
+
 def _write_dynesty_native_results(results, path: Path | None) -> Path | None:
     """Write dynesty's weighted/native result arrays to ``.npz``.
 
@@ -508,9 +536,6 @@ def _write_dynesty_native_results(results, path: Path | None) -> Path | None:
     """
     if path is None:
         return None
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
 
     if hasattr(results, "asdict"):
         try:
@@ -542,6 +567,13 @@ def _write_dynesty_native_results(results, path: Path | None) -> Path | None:
         )
         raw = {name: getattr(results, name) for name in names if hasattr(results, name)}
 
+    return _write_native_npz(raw, path, "black_box_bayes dynesty native results npz")
+
+
+def _write_native_npz(raw: dict[str, Any], path: Path, fmt_label: str) -> Path:
+    """Write the portable (numeric/bool/string) fields of ``raw`` to ``.npz``."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {}
     skipped: list[str] = []
     for key, value in raw.items():
@@ -561,7 +593,7 @@ def _write_dynesty_native_results(results, path: Path | None) -> Path | None:
         else:
             skipped.append(str(key))
 
-    arrays["_format"] = np.asarray("black_box_bayes dynesty native results npz")
+    arrays["_format"] = np.asarray(fmt_label)
     arrays["_skipped_fields"] = np.asarray(skipped, dtype=str)
     np.savez_compressed(path, **arrays)
     return path
@@ -984,6 +1016,203 @@ def _systematic_resample_indices(weights: np.ndarray, rng) -> np.ndarray:
     return np.searchsorted(cumulative, positions, side="right")
 
 
+class _PocomcPrior:
+    """pocomc prior built from the config's log_prior and prior_transform.
+
+    pocomc wants a prior object with ``logpdf`` (batched), ``rvs``, ``bounds`` and
+    ``dim``. It draws its initial particles with ``rvs`` and uses ``logpdf`` in the
+    MCMC target, so both hooks must describe the same prior. This lives at module
+    level so dill pickles it by reference into pocomc's state files.
+    """
+
+    def __init__(self, ndim: int, seed=None):
+        self.ndim = int(ndim)
+        self._rng = np.random.default_rng(seed)
+        self._bounds = _pocomc_prior_bounds(self.ndim)
+
+    @property
+    def dim(self):
+        return self.ndim
+
+    @property
+    def bounds(self):
+        return self._bounds.copy()
+
+    def logpdf(self, x):
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        logp = np.array([float(posterior.log_prior(theta)) for theta in x])
+        return np.where(np.isnan(logp), -np.inf, logp)
+
+    def rvs(self, size=1):
+        u = self._rng.random((int(size), self.ndim))
+        return np.array([np.asarray(posterior.prior_transform(ui), dtype=float) for ui in u])
+
+
+def _pocomc_prior_bounds(ndim: int) -> np.ndarray:
+    """Prior support as an (ndim, 2) array, from ``prior_bounds`` or prior_transform.
+
+    pocomc maps bounded parameters through a probit/logit reparameterization, so it
+    needs the support. Without an explicit ``prior_bounds`` it is inferred one axis
+    at a time by pushing that axis to u=0 and u=1 with the rest held at 0.5. That is
+    exact for independent priors; correlated transforms need ``prior_bounds``.
+    """
+    explicit = getattr(posterior, "prior_bounds", None)
+    if explicit is not None:
+        bounds = np.asarray(explicit() if callable(explicit) else explicit, dtype=float)
+        if bounds.shape != (ndim, 2):
+            raise ValueError(f"prior_bounds must have shape ({ndim}, 2), got {bounds.shape}.")
+        if np.any(np.isnan(bounds)) or np.any(bounds[:, 0] >= bounds[:, 1]):
+            raise ValueError("prior_bounds must satisfy lower < upper for every parameter.")
+        return bounds
+
+    bounds = np.empty((ndim, 2))
+    for i in range(ndim):
+        for j, edge in enumerate((0.0, 1.0)):
+            u = np.full(ndim, 0.5)
+            u[i] = edge
+            try:
+                with np.errstate(all="ignore"):
+                    value = float(np.asarray(posterior.prior_transform(u), dtype=float)[i])
+            except Exception:
+                value = np.nan
+            if np.isnan(value):
+                value = -np.inf if j == 0 else np.inf
+            bounds[i, j] = value
+    # A decreasing transform maps u=0 to the upper edge.
+    bounds.sort(axis=1)
+    if np.any(bounds[:, 0] >= bounds[:, 1]):
+        raise ValueError(
+            "Could not infer a non-degenerate prior support from prior_transform; "
+            "expose prior_bounds (shape (ndim, 2)) on the input object."
+        )
+    return bounds
+
+
+def _pocomc_prior_sanity(prior: _PocomcPrior, n: int = 256):
+    """Fail before sampling if prior draws fall outside the support pocomc will use."""
+    x = prior.rvs(n)
+    if x.shape != (n, prior.dim):
+        raise ValueError(f"prior_transform draws have shape {x.shape}, expected ({n}, {prior.dim}).")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("prior_transform returned non-finite values for pocomc prior draws.")
+    lo, hi = prior.bounds.T
+    outside = np.any((x < lo) | (x > hi), axis=1)
+    if np.any(outside):
+        raise ValueError(
+            f"{int(outside.sum())}/{n} prior draws fall outside the prior support "
+            f"{prior.bounds.tolist()}. The support inferred from prior_transform is only "
+            "exact for independent priors; expose prior_bounds (shape (ndim, 2)) on the "
+            "input object."
+        )
+    if not np.all(np.isfinite(prior.logpdf(x))):
+        raise ValueError(
+            "log_prior is not finite at some prior_transform draws; for pocomc the two "
+            "hooks must describe the same prior."
+        )
+
+
+def _pocomc_final_ess(sampler):
+    """Kish ESS of the untrimmed posterior weights: what pocomc's stopping rule targets."""
+    try:
+        _, logw, _, _ = sampler.posterior(trim_importance_weights=False, return_logw=True)
+        logw = np.asarray(logw, dtype=float)
+        w = np.exp(logw - np.max(logw))
+        return float(w.sum() ** 2 / np.sum(w**2))
+    except Exception as exc:
+        print(f"Could not compute pocomc posterior ESS: {exc}", file=sys.stderr)
+        return None
+
+
+def _pocomc_evidence(sampler):
+    logz, logz_err = sampler.evidence()
+    logz = None if logz is None else float(logz)
+    logz_err = None if logz_err is None else float(logz_err)
+    return logz, logz_err
+
+
+def _pocomc_to_inferencedata(sampler, args, runtime_seconds=None) -> az.InferenceData:
+    samples, weights, logl, logp = sampler.posterior()
+    samples = np.asarray(samples, dtype=float)
+    if samples.ndim != 2:
+        raise RuntimeError(f"Expected pocomc samples shape (draw, dim), got {samples.shape}.")
+    logl = np.asarray(logl, dtype=float)
+    logp = np.asarray(logp, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    weights = np.where(np.isfinite(weights), weights, 0.0)
+    if weights.sum() <= 0:
+        raise RuntimeError("pocomc posterior weights are all zero or non-finite.")
+    weights = weights / weights.sum()
+
+    if args.pocomc_equal_weight:
+        idx = _systematic_resample_indices(weights, np.random.default_rng(args.seed))
+        theta = samples[idx][None, :, :]
+        sample_stats = {
+            "importance_weight": np.full((1, len(idx)), 1.0 / len(idx)),
+            "log_likelihood": logl[idx][None, :],
+            "log_prior": logp[idx][None, :],
+        }
+    else:
+        theta = samples[None, :, :]
+        sample_stats = {
+            "importance_weight": weights[None, :],
+            "log_likelihood": logl[None, :],
+            "log_prior": logp[None, :],
+        }
+
+    logz, logz_err = _pocomc_evidence(sampler)
+    ess = _pocomc_final_ess(sampler)
+    # After a resume the checkpointed settings are the ones used, not the flags.
+    settings = getattr(sampler, "bbb_settings", None) or {}
+    extra = {
+        "pocomc_equal_weight_resample": bool(args.pocomc_equal_weight),
+        "pocomc_raw_sample_count": int(samples.shape[0]),
+        "pocomc_posterior_draw_count": int(theta.shape[1]),
+        "pocomc_n_total": int(args.pocomc_n_total),
+        "pocomc_n_evidence": int(args.pocomc_n_evidence),
+        "pocomc_n_active": int(sampler.n_active),
+        "pocomc_n_effective": int(args.pocomc_n_effective),
+        # pocomc's dynamic mode adapts n_effective as it runs.
+        "pocomc_n_effective_adapted": int(sampler.n_effective),
+        "pocomc_flow": str(settings.get("flow", args.pocomc_flow)),
+        "pocomc_precondition": bool(settings.get("precondition", args.pocomc_precondition)),
+        "pocomc_sample": str(settings.get("sample", args.pocomc_sample)),
+        "pocomc_iterations": int(sampler.t),
+        "pocomc_calls": int(sampler.calls),
+        "pocomc_native_results": str(_pocomc_native_results_path(args) or "disabled"),
+    }
+    if ess is not None:
+        extra["pocomc_final_ess"] = ess
+    if logz is not None:
+        extra["pocomc_log_evidence"] = logz
+    if logz_err is not None:
+        extra["pocomc_log_evidence_err"] = logz_err
+
+    coords, dims = _theta_coords_and_dims()
+    return _inferencedata_from_arrays(
+        posterior_data={"theta": theta},
+        sample_stats_data=sample_stats,
+        coords=coords,
+        dims=dims,
+        attrs=_common_attrs(args, "pocomc", runtime_seconds=runtime_seconds, extra=extra),
+        var_attrs=_THETA_VAR_ATTRS,
+    )
+
+
+def _write_pocomc_native_results(sampler, path: Path | None) -> Path | None:
+    """Write pocomc's full particle history (``sampler.results``) to ``.npz``."""
+    if path is None:
+        return None
+    try:
+        raw = dict(sampler.results)
+    except Exception as exc:
+        print(f"Could not collect pocomc results: {exc}", file=sys.stderr)
+        raw = {}
+    logz, logz_err = _pocomc_evidence(sampler)
+    raw["log_evidence"] = logz
+    raw["log_evidence_err"] = logz_err
+    return _write_native_npz(raw, path, "black_box_bayes pocomc native results npz")
+
+
 def _make_logposterior_op_class():
     if Op is None or pt is None:
         raise RuntimeError("PyMC/PyTensor imports have not been initialized.")
@@ -1077,7 +1306,7 @@ def parse_args(argv=None):
     parser.add_argument("--input", required=True, help="Path to pickled CalibrationConfig-like object.")
     parser.add_argument("--output", default="./", help="Output directory.")
     parser.add_argument("--idata-results", default=None, help="ArviZ InferenceData NetCDF output path.")
-    parser.add_argument("--sampler", choices=["emcee", "ptemcee", "dynesty", "pymc"], default="emcee")
+    parser.add_argument("--sampler", choices=["emcee", "ptemcee", "dynesty", "pocomc", "pymc"], default="emcee")
 
     parser.add_argument(
         "--pool",
@@ -1211,6 +1440,71 @@ def parse_args(argv=None):
     parser.add_argument("--dynesty-equal-weight", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=None)
 
+    # pocomc (preconditioned Monte Carlo). Has its own stopping rule, so --steps,
+    # --rtol and --batch-size do not apply.
+    parser.add_argument(
+        "--pocomc-n-total",
+        type=int,
+        default=4096,
+        help=(
+            "Convergence target: pocomc stops once the temperature reaches beta=1 and the "
+            "importance-weighted posterior has at least this effective sample size. "
+            "Resuming a finished run with a larger value keeps sampling."
+        ),
+    )
+    parser.add_argument(
+        "--pocomc-n-evidence",
+        type=int,
+        default=4096,
+        help=(
+            "Normalizing-flow importance samples for the evidence estimate (extra likelihood "
+            "calls). 0 uses the cheaper SMC estimate, which carries no error bar."
+        ),
+    )
+    parser.add_argument("--pocomc-n-effective", type=int, default=512, help="Target ESS per tempering step.")
+    parser.add_argument(
+        "--pocomc-n-active",
+        type=int,
+        default=256,
+        help="Particles moved by MCMC per step; keep it at most --pocomc-n-effective and a multiple of the worker count.",
+    )
+    parser.add_argument("--pocomc-n-steps", type=int, default=None, help="MCMC steps after logP plateaus (pocomc default: ndim//2).")
+    parser.add_argument("--pocomc-n-max-steps", type=int, default=None, help="Maximum MCMC steps per iteration (pocomc default: 10*n_steps).")
+    parser.add_argument("--pocomc-flow", choices=["nsf3", "nsf6", "nsf12", "maf3", "maf6", "maf12"], default="nsf6")
+    parser.add_argument("--pocomc-precondition", action=argparse.BooleanOptionalAction, default=True, help="Precondition MCMC with a normalizing flow.")
+    parser.add_argument("--pocomc-sample", choices=["tpcn", "rwm"], default="tpcn")
+    parser.add_argument("--pocomc-pytorch-threads", type=int, default=1, help="torch threads for flow training (master process only).")
+    parser.add_argument("--pocomc-progress", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--pocomc-checkpoint",
+        type=str,
+        default=None,
+        help="pocomc state file, overwritten in place (default: output/pocomc_checkpoint.state).",
+    )
+    parser.add_argument(
+        "--pocomc-checkpoint-every",
+        type=float,
+        default=300.0,
+        help="Minimum seconds between pocomc checkpoints; 0 checkpoints every iteration. The final state is always written.",
+    )
+    parser.add_argument("--pocomc-resume", action="store_true", help="Resume from --pocomc-checkpoint when it exists.")
+    parser.add_argument(
+        "--pocomc-native-results",
+        type=str,
+        default=None,
+        help=(
+            "pocomc-native particle-history archive (.npz). Defaults to "
+            "output/pocomc_results.npz. This is separate from the standardized "
+            "ArviZ InferenceData output."
+        ),
+    )
+    parser.add_argument(
+        "--no-pocomc-native-results",
+        action="store_true",
+        help="Disable the extra pocomc-native .npz archive; ArviZ output is still written.",
+    )
+    parser.add_argument("--pocomc-equal-weight", action=argparse.BooleanOptionalAction, default=True)
+
     parser.add_argument("--pymc-tune", type=int, default=1000)
     parser.add_argument("--pymc-step", choices=["demetropolisz", "demetropolis", "metropolis"], default="demetropolisz")
     parser.add_argument("--pymc-init", choices=["prior_mean", "starting_location", "random_prior"], default="prior_mean")
@@ -1239,6 +1533,12 @@ def parse_args(argv=None):
         ("--nprocs", args.nprocs),
         ("--dynesty-explore-nlive", args.dynesty_explore_nlive),
         ("--dynesty-explore-maxcall", args.dynesty_explore_maxcall),
+        ("--pocomc-n-total", args.pocomc_n_total),
+        ("--pocomc-n-effective", args.pocomc_n_effective),
+        ("--pocomc-n-active", args.pocomc_n_active),
+        ("--pocomc-n-steps", args.pocomc_n_steps),
+        ("--pocomc-n-max-steps", args.pocomc_n_max_steps),
+        ("--pocomc-pytorch-threads", args.pocomc_pytorch_threads),
     ]
     for name, value in positive:
         if value is not None and value <= 0:
@@ -1251,6 +1551,12 @@ def parse_args(argv=None):
         parser.error("--pymc-tune must be non-negative.")
     if args.dynesty_explore_batches < 0:
         parser.error("--dynesty-explore-batches must be non-negative.")
+    if args.pocomc_n_evidence < 0:
+        parser.error("--pocomc-n-evidence must be non-negative.")
+    if args.pocomc_checkpoint_every < 0:
+        parser.error("--pocomc-checkpoint-every must be non-negative.")
+    if args.pocomc_n_active > args.pocomc_n_effective:
+        parser.error("--pocomc-n-active must not exceed --pocomc-n-effective.")
     if not 0.0 <= args.dynesty_pfrac <= 1.0:
         parser.error("--dynesty-pfrac must be between 0 and 1.")
     if args.dynesty_explore_batches and (args.sampler != "dynesty" or args.dynesty_run != "dynamic"):
@@ -1651,6 +1957,182 @@ def run_dynesty(args, pool, size=1):
         pass
 
 
+def _pocomc_requested_settings(args) -> dict[str, Any]:
+    return {
+        "flow": args.pocomc_flow,
+        "precondition": bool(args.pocomc_precondition),
+        "sample": args.pocomc_sample,
+        "n_steps": args.pocomc_n_steps,
+        "n_max_steps": args.pocomc_n_max_steps,
+    }
+
+
+def _make_pocomc_sampler_class(checkpoint_path: Path, checkpoint_every: float, progress: bool = False):
+    """Build a pocomc.Sampler subclass that keeps one wall-clock-throttled checkpoint.
+
+    pocomc's own scheme writes ``{label}_{iteration}.state`` every ``save_every``
+    iterations, each holding the whole particle history, so a long run leaves a pile
+    of ever-larger files. ``run`` is driven with ``save_every=1`` and ``save_state``
+    decides instead: one file, overwritten at most every ``checkpoint_every``
+    seconds, plus the final state unconditionally.
+
+    The checkpoint settings live in this closure, not on the instance: pocomc pickles
+    ``__dict__`` into the state and merges it back on resume, which would otherwise
+    replace this run's settings with the checkpointed run's. ``bbb_settings`` is the
+    opposite case: it *should* travel with the state, because the restored values
+    are the ones the resumed run actually samples with.
+    """
+    if pocomc is None:
+        raise RuntimeError("pocomc imports have not been initialized.")
+    clock = {"last": time()}
+    resumed = {"t": None}
+
+    class CheckpointingSampler(pocomc.Sampler):
+        def save_state(self, path):
+            final = str(path).endswith("_final.state")
+            if not final:
+                # pocomc restarts the prior-warmup loop from its first batch on resume,
+                # so a warmup-phase state would duplicate particles. Nothing is lost:
+                # warmup is n_prior likelihood calls, the cheapest phase.
+                if self.warmup or time() - clock["last"] < checkpoint_every:
+                    return
+            target = Path(checkpoint_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            super().save_state(target)
+            clock["last"] = time()
+
+        def load_state(self, path):
+            current = {k: self.__dict__.get(k) for k in ("pool", "distribute", "n_active", "n_dim")}
+            requested = dict(self.__dict__.get("bbb_settings") or {})
+            super().load_state(path)
+            # A state saved without a pool carries pool=None / distribute=map, which
+            # would silently make a resumed MPI or multiprocessing run serial.
+            self.pool = current["pool"]
+            self.distribute = current["distribute"]
+            # Display only, so this run's flag wins over the checkpointed one.
+            self.progress = progress
+            restored = self.__dict__.get("bbb_settings")
+            if restored is None:
+                restored = self.bbb_settings = requested
+            # n_effective is not compared: pocomc's dynamic mode adapts it during the run.
+            mismatches = [(name, self.__dict__.get(name), current[name]) for name in ("n_active", "n_dim")]
+            mismatches += [(name, restored.get(name), requested.get(name)) for name in requested]
+            for name, used, wanted in mismatches:
+                if used != wanted:
+                    print(
+                        f"Warning: checkpoint has {name}={used}, but this run requested "
+                        f"{wanted}; the checkpointed value is used.",
+                        file=sys.stderr,
+                    )
+            resumed["t"] = self.t
+            print(f"Restored pocomc state at iteration {self.t} ({self.calls} likelihood calls).")
+            sys.stdout.flush()
+
+        def _compute_evidence(self, n=5_000):
+            # Resuming a finished state with no larger --pocomc-n-total runs no new
+            # iterations, but pocomc would still redo the evidence: n more calls to an
+            # expensive likelihood, for an estimate the checkpoint already holds.
+            if resumed["t"] == self.t and self.logz is not None and self.logz_err is not None:
+                print("Checkpoint already met the target; reusing its evidence estimate.")
+                return self.logz, self.logz_err
+            return super()._compute_evidence(n)
+
+    return CheckpointingSampler
+
+
+def run_pocomc(args, pool, size=1):
+    _pocomc_imports()
+    _check_for_log_likelihood()
+    _check_for_log_prior()
+    _check_for_prior_transform()
+    output_path = Path(args.output)
+    output_path.mkdir(parents=True, exist_ok=True)
+    idata_path = _idata_results_path(args, "pocomc")
+    native_path = _pocomc_native_results_path(args)
+    checkpoint_path = _pocomc_checkpoint_path(args)
+
+    # pocomc only distributes when handed a pool; None means its built-in serial map.
+    if isinstance(pool, SerialPool):
+        sampler_pool, workers = None, 1
+    elif isinstance(pool, MultiprocessingPool):
+        sampler_pool, workers = pool, pool.size
+    else:
+        sampler_pool, workers = pool, max(size - 1, 1)
+    if workers > 1 and args.pocomc_n_active % workers:
+        print(
+            f"Warning: --pocomc-n-active={args.pocomc_n_active} is not a multiple of the "
+            f"{workers} workers; some workers will idle on every likelihood batch.",
+            file=sys.stderr,
+        )
+
+    resume = args.pocomc_resume and checkpoint_path.exists()
+    if args.pocomc_resume and not resume:
+        print(f"No pocomc checkpoint at {checkpoint_path}; starting a fresh run.")
+
+    cls = _make_pocomc_sampler_class(checkpoint_path, args.pocomc_checkpoint_every, args.pocomc_progress)
+    sampler_kwargs = dict(
+        n_dim=int(posterior.NDIM),
+        n_effective=args.pocomc_n_effective,
+        n_active=args.pocomc_n_active,
+        pool=sampler_pool,
+        flow=args.pocomc_flow,
+        precondition=args.pocomc_precondition,
+        sample=args.pocomc_sample,
+        n_steps=args.pocomc_n_steps,
+        n_max_steps=args.pocomc_n_max_steps,
+        pytorch_threads=args.pocomc_pytorch_threads,
+        output_dir=str(checkpoint_path.parent),
+        output_label=checkpoint_path.stem,
+        random_state=args.seed,
+    )
+    sampler_kwargs = _filter_kwargs_for_callable(cls, sampler_kwargs)
+    sampler = cls(_PocomcPrior(posterior.NDIM, seed=args.seed), posterior.log_likelihood, **sampler_kwargs)
+    # Settings pocomc cannot report back (its flow object does not keep its name).
+    # Saved with each checkpoint, so after a resume these are the values in use.
+    sampler.bbb_settings = _pocomc_requested_settings(args)
+
+    print(
+        f"Running pocomc: n_active={args.pocomc_n_active}, n_effective={args.pocomc_n_effective}, "
+        f"n_total={args.pocomc_n_total}, ndim={posterior.NDIM}, flow={args.pocomc_flow}, "
+        f"precondition={args.pocomc_precondition}, workers={workers}."
+    )
+    print(f"pocomc checkpoint: {checkpoint_path} (every {args.pocomc_checkpoint_every:g} s)")
+    print(f"pocomc native results: {native_path if native_path is not None else 'disabled'}")
+    sys.stdout.flush()
+
+    run_kwargs = dict(
+        n_total=args.pocomc_n_total,
+        n_evidence=args.pocomc_n_evidence,
+        progress=args.pocomc_progress,
+        save_every=1,
+    )
+    if resume:
+        print(f"Restoring pocomc checkpoint from {checkpoint_path}")
+        run_kwargs["resume_state_path"] = str(checkpoint_path)
+    t0 = time()
+    sampler.run(**run_kwargs)
+    dt = time() - t0
+
+    logz, logz_err = _pocomc_evidence(sampler)
+    ess = _pocomc_final_ess(sampler)
+    ess_str = "unavailable" if ess is None else f"{ess:.0f}"
+    print(
+        f"pocomc converged: iterations={sampler.t}, likelihood calls={sampler.calls}, "
+        f"posterior ESS={ess_str} (target {args.pocomc_n_total})."
+    )
+    if logz is not None:
+        err = "" if logz_err is None else f" +/- {logz_err:.3f}"
+        print(f"pocomc log-evidence estimate: {logz:.3f}{err}")
+
+    idata = _pocomc_to_inferencedata(sampler, args, runtime_seconds=dt)
+    _write_idata(idata, idata_path)
+    written_native_path = _write_pocomc_native_results(sampler, native_path)
+    print(f"pocomc sampling took {_dt.timedelta(seconds=dt)}")
+    print(f"Saved ArviZ InferenceData to {idata_path}")
+    if written_native_path is not None:
+        print(f"Saved pocomc-native particle history to {written_native_path}")
+
+
 def run_pymc(args, pool, size=1):
     _pymc_imports()
     _require_steps(args, "pymc")
@@ -1720,6 +2202,18 @@ def _warmup_and_validate(args):
             raise ValueError("posterior.log_likelihood returned NaN at the warmup point.")
         _check_vector("posterior.prior_transform(0.5)", posterior.prior_transform(np.full(posterior.NDIM, 0.5)))
         return theta0
+    if sampler == "pocomc":
+        _pocomc_imports()
+        _check_for_log_likelihood()
+        _check_for_log_prior()
+        _check_for_prior_transform()
+        theta0 = _prior_mean_or_representative()
+        if np.isnan(float(posterior.log_likelihood(theta0))):
+            raise ValueError("posterior.log_likelihood returned NaN at the warmup point.")
+        if np.isnan(float(posterior.log_prior(theta0))):
+            raise ValueError("posterior.log_prior returned NaN at the warmup point.")
+        _pocomc_prior_sanity(_PocomcPrior(posterior.NDIM, seed=args.seed))
+        return theta0
     if sampler == "pymc":
         _pymc_imports()
         _require_steps(args, "pymc")
@@ -1738,10 +2232,10 @@ def _serial_timing(args, warm_point):
         else:
             [posterior.log_posterior(theta) for theta in warm_point]
             label = f"{len(warm_point)} serial log_posterior calls"
-    elif args.sampler == "dynesty":
+    elif args.sampler in ("dynesty", "pocomc"):
         theta = posterior.prior_transform(np.full(posterior.NDIM, 0.5))
         posterior.log_likelihood(theta)
-        label = "1 dynesty prior_transform + log_likelihood call"
+        label = f"1 {args.sampler} prior_transform + log_likelihood call"
     else:
         posterior.log_posterior(warm_point)
         label = "1 PyMC black-box log_posterior call"
@@ -1761,11 +2255,11 @@ def _mpi_timing(args, pool, size):
         func = posterior.log_posterior_batch if hasattr(posterior, "log_posterior_batch") else lambda xs: [posterior.log_posterior(x) for x in xs]
         pool.map(func, inputs)
         label = f"{sum(counts)} {args.sampler} log_posterior samples on {nworkers} workers"
-    elif args.sampler == "dynesty":
+    elif args.sampler in ("dynesty", "pocomc"):
         us = [np.random.default_rng(i).random(posterior.NDIM) for i in range(nworkers)]
         thetas = [posterior.prior_transform(u) for u in us]
         pool.map(posterior.log_likelihood, thetas)
-        label = f"{nworkers} dynesty likelihood calls"
+        label = f"{nworkers} {args.sampler} likelihood calls"
     else:
         thetas = [_pymc_initial_theta(args, i) for i in range(nworkers)]
         pool.map(posterior.log_posterior, thetas)
@@ -1781,6 +2275,8 @@ def _seed_global_rng(args):
 
       dynesty   an rstate= Generator, passed explicitly
       ptemcee   a random= RandomState, passed explicitly
+      pocomc    random_state=, which seeds numpy's legacy global state and torch; the
+                prior draws use their own Generator seeded from --seed
       emcee     an internal RandomState seeded from numpy's *legacy global* state at
                 construction time -- so seeding that global here is the only hook
       pymc      random_seed=, via --pymc-random-seed
@@ -1820,6 +2316,8 @@ def main(argv=None):
             run_ptemcee(args, pool, size=size)
         elif args.sampler == "dynesty":
             run_dynesty(args, pool, size=size)
+        elif args.sampler == "pocomc":
+            run_pocomc(args, pool, size=size)
         elif args.sampler == "pymc":
             run_pymc(args, pool, size=size)
         else:

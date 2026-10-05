@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "black_box_bayes"
 version = "0.1.1"
-description = "Small CLI for black-box Bayesian inference with emcee, ptemcee, dynesty, or PyMC and ArviZ NetCDF output."
+description = "Small CLI for black-box Bayesian inference with emcee, ptemcee, dynesty, pocoMC, or PyMC and ArviZ NetCDF output."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -34,6 +34,9 @@ ptemcee = [
   "ptemcee @ git+https://github.com/NuclearTalent/ptemcee_2025@de76a0ea966765f27aaeb41d2bde4bb7a5ffea33",
 ]
 dynesty = ["dynesty>=2"]
+# Pulls in torch (flow training). Kept out of `test` for that reason; its tests skip
+# when it is missing.
+pocomc = ["pocomc>=1.2,<2"]
 pymc = ["pymc>=5", "cloudpickle>=2", "pytensor>=2"]
 mpi = ["mpi4py>=3", "schwimmbad>=0.3"]
 # Dependencies of examples/. 
@@ -48,6 +51,7 @@ all = [
   "emcee>=3", "h5py>=3",
   "ptemcee @ git+https://github.com/NuclearTalent/ptemcee_2025@de76a0ea966765f27aaeb41d2bde4bb7a5ffea33",
   "dynesty>=2",
+  "pocomc>=1.2,<2",
   "pymc>=5", "cloudpickle>=2", "pytensor>=2",
   "mpi4py>=3", "schwimmbad>=0.3",
 ]
