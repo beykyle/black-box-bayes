@@ -87,6 +87,17 @@ class DummyPosterior:
             ["--input", "cfg.pkl", "--dynesty-explore-maxcall", "0"],
             "--dynesty-explore-maxcall must be positive",
         ),
+        (["--input", "cfg.pkl", "--pocomc-n-total", "0"], "--pocomc-n-total must be positive"),
+        (["--input", "cfg.pkl", "--pocomc-n-active", "0"], "--pocomc-n-active must be positive"),
+        (["--input", "cfg.pkl", "--pocomc-n-evidence", "-1"], "--pocomc-n-evidence must be non-negative"),
+        (
+            ["--input", "cfg.pkl", "--pocomc-checkpoint-every", "-1"],
+            "--pocomc-checkpoint-every must be non-negative",
+        ),
+        (
+            ["--input", "cfg.pkl", "--pocomc-n-active", "512", "--pocomc-n-effective", "256"],
+            "--pocomc-n-active must not exceed --pocomc-n-effective",
+        ),
     ],
 )
 def test_parse_args_rejects_invalid_inputs(argv, message, capsys):
@@ -753,3 +764,283 @@ def test_posterior_from_config_warns_on_name_count_mismatch(tmp_path, capsys):
 
     # Warning must land before sampling starts, not after the run.
     assert "1 parameter names but NDIM is 2" in capsys.readouterr().err
+
+
+# --- pocomc ----------------------------------------------------------------------------
+
+
+def _box_posterior(**extra):
+    attrs = dict(
+        NDIM=2,
+        log_likelihood=lambda theta: float(-0.5 * np.sum(np.asarray(theta) ** 2)),
+        log_prior=lambda theta: 0.0 if np.all(np.abs(theta) <= 10) else -np.inf,
+        prior_transform=lambda u: -10.0 + 20.0 * np.asarray(u, dtype=float),
+    )
+    attrs.update(extra)
+    return SimpleNamespace(**attrs)
+
+
+def test_pocomc_prior_infers_box_bounds():
+    cli.posterior = _box_posterior()
+    prior = cli._PocomcPrior(2, seed=0)
+    assert np.array_equal(prior.bounds, [[-10.0, 10.0], [-10.0, 10.0]])
+    assert prior.dim == 2
+    x = prior.rvs(5)
+    assert x.shape == (5, 2)
+    assert np.all(prior.logpdf(x) == 0.0)
+
+
+def test_pocomc_prior_unbounded_and_decreasing_axes():
+    from statistics import NormalDist
+
+    def transform(u):
+        u = np.asarray(u, dtype=float)
+        # Axis 0: Gaussian (infinite support). Axis 1: decreasing map onto [0, 2].
+        x0 = -np.inf if u[0] <= 0 else np.inf if u[0] >= 1 else NormalDist().inv_cdf(u[0])
+        return np.array([x0, 2.0 - 2.0 * u[1]])
+
+    cli.posterior = _box_posterior(prior_transform=transform)
+    bounds = cli._pocomc_prior_bounds(2)
+    assert np.array_equal(bounds, [[-np.inf, np.inf], [0.0, 2.0]])
+
+
+def test_pocomc_prior_explicit_bounds_override_inference():
+    cli.posterior = _box_posterior(prior_bounds=[[-1.0, 1.0], [0.0, 5.0]])
+    assert np.array_equal(cli._PocomcPrior(2).bounds, [[-1.0, 1.0], [0.0, 5.0]])
+    cli.posterior = _box_posterior(prior_bounds=[[1.0, -1.0], [0.0, 5.0]])
+    with pytest.raises(ValueError, match="lower < upper"):
+        cli._PocomcPrior(2)
+
+
+def test_pocomc_prior_sanity_flags_draws_outside_support():
+    # A correlated transform: axis 1 depends on axis 0, so per-axis inference
+    # underestimates its support.
+    def transform(u):
+        u = np.asarray(u, dtype=float)
+        return np.array([u[0], u[1] + 3.0 * (u[0] - 0.5)])
+
+    cli.posterior = _box_posterior(prior_transform=transform, log_prior=lambda theta: 0.0)
+    with pytest.raises(ValueError, match="prior_bounds"):
+        cli._pocomc_prior_sanity(cli._PocomcPrior(2, seed=1))
+
+
+def test_pocomc_prior_sanity_flags_inconsistent_log_prior():
+    cli.posterior = _box_posterior(log_prior=lambda theta: -np.inf)
+    with pytest.raises(ValueError, match="same prior"):
+        cli._pocomc_prior_sanity(cli._PocomcPrior(2, seed=1))
+
+
+class FakePocomcSampler:
+    """Stand-in for pocomc.Sampler with the pieces run_pocomc touches."""
+
+    instances: list = []
+
+    def __init__(self, prior, likelihood, n_dim=None, n_effective=512, n_active=256, pool=None,
+                 flow="nsf6", precondition=True, sample="tpcn", n_steps=None, n_max_steps=None,
+                 pytorch_threads=1, output_dir=None, output_label=None, random_state=None):
+        self.prior = prior
+        self.n_dim = n_dim
+        self.n_effective = n_effective
+        self.n_active = n_active
+        self.pool = pool
+        self.distribute = map if pool is None else pool.map
+        self.init_kwargs = dict(flow=flow, output_dir=output_dir, output_label=output_label,
+                                random_state=random_state)
+        self.warmup = True
+        self.t = 0
+        self.calls = 0
+        self.saved: list[str] = []
+        FakePocomcSampler.instances.append(self)
+
+    def save_state(self, path):
+        self.saved.append(str(path))
+        Path(path).write_text("state")
+
+    restored_settings = None
+
+    def load_state(self, path):
+        self.__dict__.update(pool=None, distribute=map, t=7, calls=700, n_active=self.n_active,
+                             progress=True, logz=-2.0, logz_err=0.2)
+        if self.restored_settings is not None:
+            self.bbb_settings = dict(self.restored_settings)
+
+    def _compute_evidence(self, n=5000):
+        self.evidence_calls = getattr(self, "evidence_calls", 0) + 1
+        self.logz, self.logz_err = -1.0, 0.1
+        return self.logz, self.logz_err
+
+    def run(self, n_total=4096, n_evidence=4096, progress=True, resume_state_path=None, save_every=None):
+        self.run_kwargs = dict(n_total=n_total, n_evidence=n_evidence, resume_state_path=resume_state_path,
+                               save_every=save_every)
+        if resume_state_path is not None:
+            self.load_state(resume_state_path)
+        self.t += 3
+        self.calls += 300
+
+    def evidence(self):
+        return -1.25, 0.05
+
+    def posterior(self, resample=False, trim_importance_weights=True, return_logw=False):
+        x = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])
+        w = np.array([0.1, 0.2, 0.3, 0.4])
+        logl = -np.arange(4.0)
+        logp = np.zeros(4)
+        if return_logw:
+            return x, np.log(w), logl, logp
+        return x, w, logl, logp
+
+    @property
+    def results(self):
+        return {"x": np.zeros((4, 2)), "beta": np.ones(4), "blobs": None}
+
+
+def _pocomc_args(tmp_path, **overrides):
+    args = cli.parse_args(["--input", "fake.pkl", "--output", str(tmp_path), "--sampler", "pocomc"])
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+@pytest.fixture
+def fake_pocomc(monkeypatch):
+    FakePocomcSampler.instances = []
+    cli.posterior = _box_posterior()
+    monkeypatch.setattr(cli, "_pocomc_imports", lambda: None)
+    monkeypatch.setattr(cli, "pocomc", SimpleNamespace(Sampler=FakePocomcSampler))
+    return FakePocomcSampler
+
+
+def test_pocomc_checkpoint_is_single_file_throttled_and_always_final(fake_pocomc, tmp_path):
+    ckpt = tmp_path / "sub" / "ck.state"
+    cls = cli._make_pocomc_sampler_class(ckpt, checkpoint_every=3600.0)
+    sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2)
+
+    sampler.warmup = False
+    sampler.save_state(tmp_path / "pmc_5.state")  # within the interval: skipped
+    assert sampler.saved == []
+    sampler.save_state(tmp_path / "pmc_final.state")  # final: always written
+    assert sampler.saved == [str(ckpt)]
+    assert not (tmp_path / "pmc_final.state").exists()
+
+    cls = cli._make_pocomc_sampler_class(ckpt, checkpoint_every=0.0)
+    sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2)
+    sampler.save_state(tmp_path / "pmc_1.state")  # warmup states would duplicate particles
+    assert sampler.saved == []
+    sampler.warmup = False
+    sampler.save_state(tmp_path / "pmc_2.state")
+    sampler.save_state(tmp_path / "pmc_3.state")
+    assert sampler.saved == [str(ckpt), str(ckpt)]
+
+
+def test_pocomc_load_state_keeps_current_pool(fake_pocomc, tmp_path, capsys):
+    cls = cli._make_pocomc_sampler_class(tmp_path / "ck.state", checkpoint_every=0.0)
+    pool = cli.SerialPool()
+    sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2, pool=pool)
+    sampler.load_state(tmp_path / "ck.state")
+    assert sampler.pool is pool
+    assert sampler.distribute == pool.map
+    assert "iteration 7" in capsys.readouterr().out
+
+
+def test_run_pocomc_fresh_run_writes_outputs(fake_pocomc, tmp_path):
+    args = _pocomc_args(tmp_path, pocomc_n_total=1000, seed=3)
+    cli.run_pocomc(args, cli.SerialPool(), size=1)
+
+    sampler = fake_pocomc.instances[-1]
+    assert sampler.pool is None  # serial: pocomc's own map
+    assert sampler.run_kwargs["n_total"] == 1000
+    assert sampler.run_kwargs["resume_state_path"] is None
+    assert sampler.run_kwargs["save_every"] == 1
+    assert sampler.init_kwargs["output_label"] == "pocomc_checkpoint"
+    assert sampler.init_kwargs["random_state"] == 3
+    assert (tmp_path / "pocomc_idata.nc").exists()
+    native = np.load(tmp_path / "pocomc_results.npz")
+    assert float(native["log_evidence"]) == -1.25
+    assert "blobs" not in native.files
+
+
+def test_run_pocomc_resumes_only_when_checkpoint_exists(fake_pocomc, tmp_path, capsys):
+    args = _pocomc_args(tmp_path, pocomc_resume=True, no_pocomc_native_results=True)
+    cli.run_pocomc(args, cli.SerialPool(), size=1)
+    assert fake_pocomc.instances[-1].run_kwargs["resume_state_path"] is None
+    assert "starting a fresh run" in capsys.readouterr().out
+
+    ckpt = tmp_path / "pocomc_checkpoint.state"
+    ckpt.write_text("state")
+    cli.run_pocomc(args, cli.SerialPool(), size=1)
+    sampler = fake_pocomc.instances[-1]
+    assert sampler.run_kwargs["resume_state_path"] == str(ckpt)
+    assert sampler.t == 10  # 7 restored + 3 new
+
+
+def test_run_pocomc_warns_when_n_active_not_multiple_of_workers(fake_pocomc, tmp_path, capsys):
+    args = _pocomc_args(tmp_path, pocomc_n_active=100, no_pocomc_native_results=True)
+    pool = SimpleNamespace(map=map)
+    cli.run_pocomc(args, pool, size=4)  # MPI-style: 3 workers
+    assert fake_pocomc.instances[-1].pool is pool
+    assert "not a multiple of the 3 workers" in capsys.readouterr().err
+
+
+def test_pocomc_conversion_equal_weight_and_weighted(fake_pocomc, tmp_path):
+    sampler = FakePocomcSampler(None, None, n_dim=2)
+    sampler.t, sampler.calls = 12, 3456
+
+    idata = cli._pocomc_to_inferencedata(sampler, _pocomc_args(tmp_path, seed=0), runtime_seconds=1.0)
+    assert idata.posterior["theta"].shape == (1, 4, 2)
+    assert np.allclose(idata.sample_stats["importance_weight"].values, 0.25)
+    attrs = idata.posterior.attrs
+    assert attrs["sampler"] == "pocomc"
+    assert attrs["pocomc_log_evidence"] == -1.25
+    assert attrs["pocomc_log_evidence_err"] == 0.05
+    assert attrs["pocomc_iterations"] == 12
+    assert attrs["pocomc_calls"] == 3456
+    assert attrs["pocomc_final_ess"] == pytest.approx(1.0 / np.sum(np.array([0.1, 0.2, 0.3, 0.4]) ** 2))
+
+    idata = cli._pocomc_to_inferencedata(sampler, _pocomc_args(tmp_path, pocomc_equal_weight=False))
+    assert np.allclose(idata.sample_stats["importance_weight"].values[0], [0.1, 0.2, 0.3, 0.4])
+    assert np.allclose(idata.sample_stats["log_likelihood"].values[0], -np.arange(4.0))
+
+
+def test_dynesty_native_results_archive_format_unchanged(tmp_path):
+    results = SimpleNamespace(samples=np.zeros((3, 2)), logz=np.array([-3.0, -2.0, -1.0]), bad=object())
+    path = cli._write_dynesty_native_results(results, tmp_path / "nested" / "res.npz")
+    data = np.load(path)
+    assert str(data["_format"]) == "black_box_bayes dynesty native results npz"
+    assert data["samples"].shape == (3, 2)
+
+
+def test_pocomc_resume_warns_and_records_checkpointed_settings(fake_pocomc, tmp_path, capsys):
+    cls = cli._make_pocomc_sampler_class(tmp_path / "ck.state", checkpoint_every=0.0, progress=False)
+    sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2)
+    args = _pocomc_args(tmp_path, pocomc_flow="maf3")
+    sampler.bbb_settings = cli._pocomc_requested_settings(args)
+    sampler.restored_settings = dict(sampler.bbb_settings, flow="nsf6")
+
+    sampler.load_state(tmp_path / "ck.state")
+
+    assert "checkpoint has flow=nsf6, but this run requested maf3" in capsys.readouterr().err
+    assert sampler.progress is False  # this run's display flag, not the checkpoint's
+    idata = cli._pocomc_to_inferencedata(sampler, args)
+    assert idata.posterior.attrs["pocomc_flow"] == "nsf6"
+
+
+def test_pocomc_resume_of_finished_state_reuses_evidence(fake_pocomc, tmp_path):
+    cls = cli._make_pocomc_sampler_class(tmp_path / "ck.state", checkpoint_every=0.0)
+    sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2)
+    sampler.load_state(tmp_path / "ck.state")
+
+    # No new iterations since the load: keep the checkpoint's estimate.
+    assert sampler._compute_evidence(100) == (-2.0, 0.2)
+    assert getattr(sampler, "evidence_calls", 0) == 0
+
+    # The run went on sampling, so the evidence must be recomputed.
+    sampler.t += 1
+    assert sampler._compute_evidence(100) == (-1.0, 0.1)
+    assert sampler.evidence_calls == 1
+
+
+def test_pocomc_fresh_run_always_computes_evidence(fake_pocomc, tmp_path):
+    cls = cli._make_pocomc_sampler_class(tmp_path / "ck.state", checkpoint_every=0.0)
+    sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2)
+    sampler.logz, sampler.logz_err = -3.0, 0.3
+    assert sampler._compute_evidence(100) == (-1.0, 0.1)

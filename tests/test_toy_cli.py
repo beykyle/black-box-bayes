@@ -448,3 +448,74 @@ def test_toy_dynesty_dynamic_runs_full_range_explore_batches(tmp_path):
     # Provenance: two .nc files that differ only in exploration must be distinguishable.
     assert idata.posterior.attrs["dynesty_explore_batches"] == 2
     assert idata.posterior.attrs["dynesty_explore_nlive"] == 50
+
+
+# --- pocomc ----------------------------------------------------------------------------
+
+POCOMC_ARGS = (
+    "--sampler", "pocomc",
+    "--pocomc-n-active", "64", "--pocomc-n-effective", "128",
+    "--pocomc-n-evidence", "256", "--seed", "1",
+)
+
+
+def _run_toy_pocomc(tmp_path, out, *extra):
+    return subprocess.run(
+        [
+            sys.executable, "-m", "black_box_bayes",
+            "--input", "toy_config.pkl",
+            "--output", str(out),
+            *POCOMC_ARGS,
+            *extra,
+        ],
+        cwd=tmp_path, env=subprocess_env(), text=True, capture_output=True, check=True,
+    )
+
+
+@pytest.mark.skipif(importlib.util.find_spec("pocomc") is None, reason="pocomc is not installed")
+def test_toy_pocomc_converges_and_resume_extends_the_run(tmp_path):
+    copy_toy(tmp_path)
+    subprocess.run([sys.executable, "make_config.py"], cwd=tmp_path, check=True)
+    sys.path.insert(0, str(tmp_path))
+    try:
+        from toy_model import make_config
+
+        expected = make_config(str(tmp_path / "toy_config.pkl")).posterior_mean()
+    finally:
+        sys.path.remove(str(tmp_path))
+    out = tmp_path / "poco"
+
+    _run_toy_pocomc(tmp_path, out, "--no-mpi", "--pocomc-n-total", "256")
+    assert (out / "pocomc_checkpoint.state").exists()
+    assert not list(out.glob("*_final.state"))  # pocomc's per-iteration files are not written
+    first = az.from_netcdf(out / "pocomc_idata.nc")
+    _assert_toy_names_are_readable(first)
+    attrs = first.posterior.attrs
+    assert attrs["pocomc_final_ess"] >= 256
+    assert np.isfinite(attrs["pocomc_log_evidence"])
+    mean = first.posterior["theta"].mean(("chain", "draw")).values
+    assert np.allclose(mean, expected, atol=0.1)
+    assert "log_evidence" in np.load(out / "pocomc_results.npz").files
+
+    # A finished checkpoint plus a larger --pocomc-n-total keeps sampling.
+    # (Separate idata path: `first` still holds the original file open.)
+    result = _run_toy_pocomc(
+        tmp_path, out, "--no-mpi", "--pocomc-n-total", "512", "--pocomc-resume",
+        "--idata-results", str(out / "extended.nc"),
+    )
+    assert "Restored pocomc state" in result.stdout
+    second = az.from_netcdf(out / "extended.nc").posterior.attrs
+    assert second["pocomc_iterations"] > attrs["pocomc_iterations"]
+    assert second["pocomc_calls"] > attrs["pocomc_calls"]
+    assert second["pocomc_final_ess"] >= 512
+
+
+@pytest.mark.skipif(importlib.util.find_spec("pocomc") is None, reason="pocomc is not installed")
+def test_toy_pocomc_multiprocessing_matches_serial(tmp_path):
+    copy_toy(tmp_path)
+    subprocess.run([sys.executable, "make_config.py"], cwd=tmp_path, check=True)
+    _run_toy_pocomc(tmp_path, tmp_path / "ser", "--pool", "serial", "--pocomc-n-total", "256")
+    _run_toy_pocomc(tmp_path, tmp_path / "mp", "--pool", "multiprocessing", "--nprocs", "2", "--pocomc-n-total", "256")
+    ser = az.from_netcdf(tmp_path / "ser" / "pocomc_idata.nc").posterior["theta"].values
+    mp = az.from_netcdf(tmp_path / "mp" / "pocomc_idata.nc").posterior["theta"].values
+    assert np.array_equal(ser, mp)
