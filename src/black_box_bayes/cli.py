@@ -1198,8 +1198,44 @@ def _pocomc_to_inferencedata(sampler, args, runtime_seconds=None) -> az.Inferenc
     )
 
 
+def pocomc_log_weights(logl, beta, logz, beta_final: float = 1.0) -> np.ndarray:
+    """pocomc's persistent-sampling log weights of every stored particle at ``beta_final``.
+
+    Recomputes, from a ``pocomc_results.npz``, what ``pocomc``'s
+    ``Particles.compute_logw_and_logz(beta_final)`` returns: the particles of every
+    iteration pooled as a mixture of the tempered distributions they were drawn from,
+
+        log w_i = beta_final * logl_i - log( (1/T) sum_t exp(beta_t * logl_i - logz_t) ).
+
+    ``logl`` is ``(n_iter, n_active)`` (or flat, iteration-major), ``beta`` and ``logz``
+    are ``(n_iter,)``.  Returns weights shaped like ``logl``, normalised to sum to 1 in
+    linear space.  ``beta_final = 1`` reproduces the archive's ``logw_posterior``; any
+    other value gives the tempered posterior at that inverse temperature, which the
+    archive otherwise has no way to express (pocomc keeps no per-iteration weights).
+    """
+    logl = np.asarray(logl, dtype=float)
+    beta = np.asarray(beta, dtype=float).reshape(-1)
+    logz = np.asarray(logz, dtype=float).reshape(-1)
+    shape = logl.shape
+    flat = logl.reshape(-1)
+    terms = flat[None, :] * beta[:, None] - logz[:, None]  # (n_iter, n_particles)
+    log_den = np.logaddexp.reduce(terms, axis=0) - np.log(len(beta))
+    logw = beta_final * flat - log_den
+    logw -= np.logaddexp.reduce(logw)
+    return logw.reshape(shape)
+
+
 def _write_pocomc_native_results(sampler, path: Path | None) -> Path | None:
-    """Write pocomc's full particle history (``sampler.results``) to ``.npz``."""
+    """Write pocomc's full particle history (``sampler.results``) to ``.npz``.
+
+    Every per-particle field is stored ``(n_iter, n_active, ...)`` and every per-iteration
+    field ``(n_iter,)``.  The one exception pocomc introduces is ``logw``:
+    ``Sampler.results`` replaces the per-iteration weights with a single flat array of
+    importance weights *toward beta = 1* over all stored particles.  Stored under that
+    name it reads as a per-iteration field and is not one, so it is written as
+    ``logw_posterior`` (shaped like ``logl``, with ``logw_posterior_beta = 1``) instead;
+    :func:`pocomc_log_weights` recomputes the weights at any other beta.
+    """
     if path is None:
         return None
     try:
@@ -1207,6 +1243,13 @@ def _write_pocomc_native_results(sampler, path: Path | None) -> Path | None:
     except Exception as exc:
         print(f"Could not collect pocomc results: {exc}", file=sys.stderr)
         raw = {}
+    if "logw" in raw:
+        logw = np.asarray(raw.pop("logw"), dtype=float)
+        logl = raw.get("logl")
+        if logl is not None and np.size(logl) == logw.size:
+            logw = logw.reshape(np.shape(logl))
+        raw["logw_posterior"] = logw
+        raw["logw_posterior_beta"] = np.asarray(1.0)
     logz, logz_err = _pocomc_evidence(sampler)
     raw["log_evidence"] = logz
     raw["log_evidence_err"] = logz_err
