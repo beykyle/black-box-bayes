@@ -606,7 +606,7 @@ are the ones each project asks for.
   title   = {Ensemble samplers with affine invariance},
   journal = {Communications in Applied Mathematics and Computational Science},
   volume  = {5},
-  number  = {1},
+ number  = {1},
   pages   = {65--80},
   year    = {2010},
   doi     = {10.2140/camcos.2010.5.65}
@@ -633,9 +633,7 @@ The `ptemcee` README asks for both the adaptive parallel-tempering paper and the
 
 ### dynesty (`--sampler dynesty`)
 
-Cite the `dynesty` paper, the Zenodo record **for the version you used** (find it
-from the [concept DOI](https://doi.org/10.5281/zenodo.3348367)), and Skilling's
-nested sampling papers:
+Cite the `dynesty` paper and Skilling's nested sampling papers:
 
 ```bibtex
 @article{Speagle2020,
@@ -649,13 +647,6 @@ nested sampling papers:
   doi     = {10.1093/mnras/staa278}
 }
 
-@software{Koposov_dynesty,
-  author    = {Koposov, Sergey and Speagle, Josh and Barbary, Kyle and others},
-  title     = {joshspeagle/dynesty},
-  publisher = {Zenodo},
-  doi       = {10.5281/zenodo.3348367},
-  note      = {Replace with the version-specific DOI for the release you used}
-}
 
 @inproceedings{Skilling2004,
   author    = {Skilling, John},
