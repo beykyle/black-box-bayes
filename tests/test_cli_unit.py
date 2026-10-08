@@ -1044,3 +1044,61 @@ def test_pocomc_fresh_run_always_computes_evidence(fake_pocomc, tmp_path):
     sampler = cls(cli._PocomcPrior(2), lambda x: 0.0, n_dim=2)
     sampler.logz, sampler.logz_err = -3.0, 0.3
     assert sampler._compute_evidence(100) == (-1.0, 0.1)
+
+
+class _ResultsWithPersistentLogw(FakePocomcSampler):
+    """pocomc's ``results``: per-iteration fields, but ``logw`` flat and toward beta = 1."""
+
+    LOGL = np.array([[-5.0, -4.0, -3.0], [-2.0, -1.5, -1.0]])
+    BETA = np.array([0.0, 1.0])
+    LOGZ = np.array([0.0, -1.2])
+
+    @property
+    def results(self):
+        logw = cli.pocomc_log_weights(self.LOGL, self.BETA, self.LOGZ).reshape(-1)
+        return {"x": np.zeros((2, 3, 2)), "logl": self.LOGL, "beta": self.BETA, "logz": self.LOGZ,
+                "logw": logw, "blobs": None}
+
+
+def test_pocomc_native_archive_names_the_posterior_weights(fake_pocomc, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "pocomc", SimpleNamespace(Sampler=_ResultsWithPersistentLogw))
+    cli.run_pocomc(_pocomc_args(tmp_path), cli.SerialPool(), size=1)
+    native = np.load(tmp_path / "pocomc_results.npz")
+    assert "logw" not in native.files  # the flat beta=1 array is not a per-iteration field
+    assert native["logw_posterior"].shape == native["logl"].shape == (2, 3)
+    assert float(native["logw_posterior_beta"]) == 1.0
+    np.testing.assert_allclose(
+        native["logw_posterior"], cli.pocomc_log_weights(native["logl"], native["beta"], native["logz"])
+    )
+
+
+def test_pocomc_log_weights_is_the_persistent_sampling_mixture():
+    logl = np.array([[-5.0, -4.0], [-2.0, -1.0], [-1.5, -0.5]])
+    beta = np.array([0.0, 0.4, 1.0])
+    logz = np.array([0.0, -0.9, -1.7])
+    for beta_final in (0.0, 0.25, 1.0):
+        den = np.mean([np.exp(b * logl - z) for b, z in zip(beta, logz)], axis=0)
+        want = np.exp(beta_final * logl) / den
+        want /= want.sum()
+        np.testing.assert_allclose(np.exp(cli.pocomc_log_weights(logl, beta, logz, beta_final)), want, rtol=1e-12)
+    # flat input, iteration-major, gives the same weights flattened
+    np.testing.assert_allclose(cli.pocomc_log_weights(logl.reshape(-1), beta, logz),
+                               cli.pocomc_log_weights(logl, beta, logz).reshape(-1))
+
+
+def test_pocomc_log_weights_matches_pocomc_itself():
+    pocomc = pytest.importorskip("pocomc")
+    from pocomc.particles import Particles
+
+    rng = np.random.default_rng(0)
+    particles = Particles(n_particles=4, n_dim=1)
+    beta, logz = [0.0, 0.3, 1.0], [0.0, -0.7, -1.9]
+    for b, z in zip(beta, logz):
+        particles.update(dict(u=rng.normal(size=(4, 1)), x=rng.normal(size=(4, 1)), logdetj=np.zeros(4),
+                              logl=rng.normal(-2, 1, size=4), logp=np.zeros(4), logw=np.zeros(4), blobs=None,
+                              iter=0, logz=z, calls=4, steps=1, efficiency=1.0, ess=4.0, accept=0.5, beta=b))
+    logl = particles.get("logl")
+    for beta_final in (0.3, 0.6, 1.0):
+        want, _ = particles.compute_logw_and_logz(beta_final)
+        got = cli.pocomc_log_weights(logl, particles.get("beta"), particles.get("logz"), beta_final)
+        np.testing.assert_allclose(got.reshape(-1), want, rtol=1e-12)

@@ -555,8 +555,23 @@ draws against the support and fails early if they disagree.
 
 ```text
 pocomc_idata.nc          # ArviZ posterior view (equal-weight resample by default)
-pocomc_results.npz       # full particle history: x, logl, logp, logw, beta, logz, ... + evidence
+pocomc_results.npz       # full particle history: x, logl, logp, beta, logz, ... + evidence
 pocomc_checkpoint.state  # resumable sampler state
+```
+
+In `pocomc_results.npz` every per-particle field is `(n_iter, n_active, ...)` and every
+per-iteration field (`beta`, `logz`, `ess`, ...) is `(n_iter,)`. pocoMC keeps no
+per-iteration weights: its `results` hands back one array of importance weights of all
+stored particles *toward beta = 1*. That array is stored as `logw_posterior`, shaped like
+`logl`, not as `logw`, so it cannot be mistaken for weights at each iteration's beta. For
+the tempered posterior at any other beta, recompute the same persistent-sampling weights:
+
+```python
+import numpy as np
+from black_box_bayes.cli import pocomc_log_weights
+
+z = np.load("pocomc_results.npz")
+logw = pocomc_log_weights(z["logl"], z["beta"], z["logz"], beta_final=0.3)  # shaped like logl
 ```
 
 `--no-pocomc-equal-weight` keeps the weighted particles instead, with their
